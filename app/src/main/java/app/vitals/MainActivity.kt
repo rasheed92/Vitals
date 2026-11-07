@@ -51,6 +51,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -100,9 +102,14 @@ fun App(vm: ObdViewModel = viewModel()) {
                 else -> {
                     TabRow(selectedTabIndex = tab, containerColor = Bg) {
                         Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("البيانات") })
-                        Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("الكونسول") })
+                        Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("BMW") })
+                        Tab(selected = tab == 2, onClick = { tab = 2 }, text = { Text("الكونسول") })
                     }
-                    if (tab == 0) Dashboard(vm) else Console(vm)
+                    when (tab) {
+                        0 -> Dashboard(vm)
+                        1 -> BmwScanner(vm)
+                        else -> Console(vm)
+                    }
                 }
             }
         }
@@ -208,6 +215,72 @@ private fun Sparkline(h: List<Float>, modifier: Modifier) {
             if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
         }
         drawPath(path, Accent, style = Stroke(width = 2.dp.toPx()))
+    }
+}
+
+@Composable
+private fun BmwScanner(vm: ObdViewModel) {
+    var ecu by remember { mutableIntStateOf(0x12) }
+    var from by remember { mutableStateOf("4000") }
+    var to by remember { mutableStateOf("4FFF") }
+    val clipboard = LocalClipboardManager.current
+    val presets = listOf("4000" to "4FFF", "5000" to "5FFF", "D000" to "DFFF", "F100" to "F1FF")
+
+    Column(Modifier.fillMaxSize().padding(12.dp)) {
+        Text(
+            "يقرا قيم BMW الخاصة من الكمبيوتر مباشرة (قراءة بس، ما يغيّر شي). خلي المحرك شغّال، " +
+                "والبيانات الحية تتوقف وقت الفحص.",
+            color = Muted, fontSize = 12.sp,
+        )
+        Spacer(Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            for ((id, label) in listOf(0x12 to "المحرك DME", 0x18 to "الگير EGS")) {
+                val sel = ecu == id
+                TextButton(
+                    onClick = { ecu = id },
+                    enabled = !vm.bmwRunning,
+                    modifier = Modifier.clip(RoundedCornerShape(8.dp)).background(if (sel) Accent.copy(alpha = 0.25f) else Color.Transparent),
+                ) { Text(label, color = if (sel) Color.White else Muted) }
+                Spacer(Modifier.width(6.dp))
+            }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(
+                value = from, onValueChange = { from = it.uppercase(Locale.US).take(4) },
+                modifier = Modifier.weight(1f), singleLine = true, label = { Text("من") }, enabled = !vm.bmwRunning,
+            )
+            Spacer(Modifier.width(8.dp))
+            OutlinedTextField(
+                value = to, onValueChange = { to = it.uppercase(Locale.US).take(4) },
+                modifier = Modifier.weight(1f), singleLine = true, label = { Text("إلى") }, enabled = !vm.bmwRunning,
+            )
+        }
+        Row {
+            for ((a, b) in presets) {
+                TextButton(onClick = { from = a; to = b }, enabled = !vm.bmwRunning) { Text(a.take(2) + "xx", fontSize = 12.sp) }
+            }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (vm.bmwRunning) {
+                Button(onClick = { vm.bmwStop() }) { Text("وگّف") }
+            } else {
+                Button(onClick = {
+                    val f = from.toIntOrNull(16); val t = to.toIntOrNull(16)
+                    if (f != null && t != null) vm.bmwScan(ecu, f, t)
+                }) { Text("ابدأ الفحص") }
+            }
+            Spacer(Modifier.width(8.dp))
+            TextButton(onClick = { clipboard.setText(AnnotatedString(vm.bmwReport())) }, enabled = vm.bmwHits.isNotEmpty()) {
+                Text("نسخ النتائج")
+            }
+        }
+        Text(vm.bmwProgress, color = Muted, fontSize = 12.sp)
+        Spacer(Modifier.height(6.dp))
+        LazyColumn(Modifier.weight(1f), reverseLayout = true) {
+            listItems(vm.bmwHits.reversed()) { h ->
+                Text(h.line, fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = Color.White)
+            }
+        }
     }
 }
 

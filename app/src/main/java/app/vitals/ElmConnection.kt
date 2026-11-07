@@ -11,6 +11,34 @@ import java.io.Closeable
 import java.io.IOException
 import java.util.Locale
 
+/** Reply to a UDS ReadDataByIdentifier (0x22). */
+sealed class Uds {
+    class Positive(val data: IntArray) : Uds()
+    class Negative(val nrc: Int) : Uds()
+    object None : Uds()
+
+    companion object {
+        private val HEX = Regex("^[0-9A-F]+$")
+
+        /** ELM output (headers off, spaces off) -> result. Handles "014 / 0:… 1:…" multi-frame. */
+        fun parse(resp: String, did: Int): Uds {
+            val lines = resp.uppercase(Locale.US).lines().map { it.replace(" ", "").trim() }
+                .filter { it.isNotEmpty() }
+                .filterNot { it.startsWith("7F2278") } // response pending
+            if (lines.isEmpty()) return None
+            val hex = if (lines.size > 1 && lines[0].length == 3 && HEX.matches(lines[0]) && lines[1].contains(':')) {
+                val len = lines[0].toInt(16)
+                lines.drop(1).filter { it.contains(':') }.joinToString("") { it.substringAfter(':') }.take(len * 2)
+            } else lines.firstOrNull { HEX.matches(it) } ?: return None
+            if (hex.length % 2 != 0) return None
+            val b = IntArray(hex.length / 2) { hex.substring(it * 2, it * 2 + 2).toInt(16) }
+            if (b.size >= 3 && b[0] == 0x7F && b[1] == 0x22) return Negative(b[2])
+            if (b.size >= 3 && b[0] == 0x62 && ((b[1] shl 8) or b[2]) == did) return Positive(b.copyOfRange(3, b.size))
+            return None
+        }
+    }
+}
+
 /** No reply before the timeout. Not fatal: the link is still up. */
 class ElmTimeout(msg: String) : Exception(msg)
 
@@ -38,25 +66,49 @@ class ElmConnection private constructor(private val t: BleTransport) : Closeable
         }
     }
 
-    suspend fun send(cmd: String, timeoutMs: Long = 1500): String = mutex.withLock {
-        withContext(Dispatchers.IO) {
-            t.clearInput()
-            t.write((cmd + "\r").toByteArray(Charsets.US_ASCII))
+    suspend fun send(cmd: String, timeoutMs: Long = 1500): String = mutex.withLock { raw(cmd, timeoutMs) }
 
-            val sb = StringBuilder()
-            val deadline = System.currentTimeMillis() + timeoutMs
-            while (true) {
-                val left = deadline - System.currentTimeMillis()
-                if (left <= 0) throw ElmTimeout("ماكو رد على $cmd")
-                val c = t.readByte(left)
-                if (c < 0) continue
-                if (c == '>'.code) break
-                sb.append(c.toChar())
+    /** One command, caller must hold [mutex]. */
+    private suspend fun raw(cmd: String, timeoutMs: Long): String = withContext(Dispatchers.IO) {
+        t.clearInput()
+        t.write((cmd + "\r").toByteArray(Charsets.US_ASCII))
+
+        val sb = StringBuilder()
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (true) {
+            val left = deadline - System.currentTimeMillis()
+            if (left <= 0) throw ElmTimeout("ماكو رد على $cmd")
+            val c = t.readByte(left)
+            if (c < 0) continue
+            if (c == '>'.code) break
+            sb.append(c.toChar())
+        }
+        sb.toString().replace("\r", "\n").lines()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() && it != cmd && !it.startsWith("SEARCHING") }
+            .joinToString("\n")
+    }
+
+    /**
+     * Talks to one BMW ECU over UDS with BMW extended addressing (tester F1, request id 6F1,
+     * reply id 600+ecu). Holds the link for the whole block, then puts the adapter back into
+     * plain OBD mode so the live poller keeps working. [ecu]: 0x12 DME, 0x18 EGS.
+     * Read-only use: the block only gets [read] for service 0x22.
+     */
+    suspend fun <T> bmw(ecu: Int, block: suspend (read: suspend (did: Int) -> Uds) -> T): T = mutex.withLock {
+        val e = String.format(Locale.US, "%02X", ecu)
+        for (c in listOf("ATSH6F1", "ATCEA$e", "ATCRA6$e", "ATFCSH6F1", "ATFCSD${e}300000", "ATFCSM1")) raw(c, 1500)
+        try {
+            block read@{ did ->
+                val r = try {
+                    raw(String.format(Locale.US, "22%04X", did), 1200)
+                } catch (_: ElmTimeout) {
+                    return@read Uds.None
+                }
+                Uds.parse(r, did)
             }
-            sb.toString().replace("\r", "\n").lines()
-                .map { it.trim() }
-                .filter { it.isNotEmpty() && it != cmd && !it.startsWith("SEARCHING") }
-                .joinToString("\n")
+        } finally {
+            for (c in listOf("ATFCSM0", "ATCEA", "ATCRA", "ATSH7DF")) try { raw(c, 1500) } catch (_: ElmTimeout) {}
         }
     }
 

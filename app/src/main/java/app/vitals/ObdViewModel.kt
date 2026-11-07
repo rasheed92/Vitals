@@ -137,6 +137,7 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
         pollJob = viewModelScope.launch {
             var tick = 0
             while (isActive) {
+                if (bmwRunning) { delay(200); continue } // scanner owns the link
                 for (p in active) {
                     if (!p.fast && tick % 6 != 0) continue // temps change slowly
                     val bytes = try {
@@ -181,6 +182,72 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // --- BMW DID scanner (read-only, service 0x22) ---
+    data class Hit(val ecu: Int, val did: Int, val data: IntArray) {
+        val hex: String get() = data.joinToString(" ") { String.format(Locale.US, "%02X", it) }
+        val ascii: String? get() = data.filter { it != 0xFF && it != 0x00 }
+            .takeIf { d -> d.size >= 3 && d.all { it in 0x20..0x7E } }
+            ?.joinToString("") { it.toChar().toString() }
+        val line: String get() = String.format(Locale.US, "%s %04X: %s", ecuName(ecu), did, hex) +
+            (ascii?.let { "  \"$it\"" } ?: "")
+    }
+
+    var bmwRunning by mutableStateOf(false); private set
+    var bmwProgress by mutableStateOf(""); private set
+    val bmwHits = mutableStateListOf<Hit>()
+    private var bmwJob: Job? = null
+
+    fun bmwScan(ecu: Int, from: Int, to: Int) {
+        val c = conn ?: return
+        if (bmwRunning || from > to) return
+        bmwRunning = true
+        bmwJob = viewModelScope.launch {
+            var did = from
+            var neg = 0
+            var silent = 0
+            try {
+                addLog("BMW scan ${ecuName(ecu)} ${hex4(from)}–${hex4(to)}")
+                while (did <= to && isActive) {
+                    val end = minOf(did + 63, to)
+                    c.bmw(ecu) { read ->
+                        while (did <= end && isActive) {
+                            when (val r = read(did)) {
+                                is Uds.Positive -> {
+                                    val h = Hit(ecu, did, r.data)
+                                    bmwHits.add(h)
+                                    addLog(h.line)
+                                }
+                                is Uds.Negative -> neg++
+                                Uds.None -> silent++
+                            }
+                            did++
+                            if (did % 8 == 0) bmwProgress = "${ecuName(ecu)} ${hex4(did)} / ${hex4(to)} · لكى ${bmwHits.count { it.ecu == ecu }}"
+                        }
+                    }
+                    // Nothing at all from the ECU for a while = wrong address / ECU asleep.
+                    if (silent >= 64 && neg == 0 && bmwHits.none { it.ecu == ecu }) {
+                        addLog("ERROR ${ecuName(ecu)} ما يرد. السيارة شغّالة؟")
+                        break
+                    }
+                }
+                bmwProgress = "خلص ${ecuName(ecu)} · لكى ${bmwHits.count { it.ecu == ecu }} قيمة"
+            } catch (e: IOException) {
+                lost(e)
+            } catch (e: Exception) {
+                bmwProgress = "توقف: ${e.message}"
+            } finally {
+                bmwRunning = false
+            }
+        }
+    }
+
+    fun bmwStop() { bmwJob?.cancel() }
+
+    fun bmwReport(): String = buildString {
+        append("Vitals BMW scan\n")
+        for (h in bmwHits) append(h.line).append('\n')
+    }
+
     private fun lost(e: Exception) {
         addLog("ERROR ${e.message}")
         disconnect()
@@ -188,6 +255,7 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun disconnect() {
+        bmwJob?.cancel()
         pollJob?.cancel()
         pollJob = null
         conn?.close()
@@ -207,6 +275,9 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
         disconnect()
     }
 }
+
+fun ecuName(ecu: Int) = when (ecu) { 0x12 -> "DME"; 0x18 -> "EGS"; else -> String.format(Locale.US, "%02X", ecu) }
+fun hex4(v: Int) = String.format(Locale.US, "%04X", v)
 
 fun requiredPermissions(): Array<String> =
     if (Build.VERSION.SDK_INT >= 31) arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
