@@ -16,6 +16,17 @@ android {
         versionName = "0.1"
     }
 
+    // One fixed key for every CI build, so a new APK installs over the old one
+    // (keeps settings, and keeps the Play-Store install record Android Auto needs).
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("vitals-debug.jks")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
         release { isMinifyEnabled = false }
     }
