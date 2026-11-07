@@ -31,6 +31,7 @@ class VitalsCarService : CarAppService() {
     override fun onCreateSession(): Session = object : Session() {
         override fun onCreateScreen(intent: Intent): Screen {
             ObdViewModel.get(carContext).ensureAutoConnect()
+            app.vitals.Theme.load(carContext)
             return DashScreen(carContext)
         }
     }
@@ -97,6 +98,12 @@ class DashScreen(ctx: CarContext) : Screen(ctx) {
 
     override fun onGetTemplate(): Template {
         val strip = ActionStrip.Builder()
+            .addAction(
+                Action.Builder().setTitle(app.vitals.Theme.mode.label).setOnClickListener {
+                    app.vitals.Theme.next(carContext)
+                    invalidate() // refresh the button title; the surface redraws on its own
+                }.build(),
+            )
             .addAction(
                 Action.Builder().setTitle("تصفير").setOnClickListener { engine.resetMinMax() }.build(),
             )

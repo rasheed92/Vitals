@@ -54,6 +54,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.foundation.border
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -68,22 +72,26 @@ import java.util.Locale
 import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.lazy.items as listItems
 
-// Design tokens (Vitals G30 design): carbon-black ground, M-stripe state colours.
-private val Bg = Color(0xFF0E1322)
-private val CardBg = Color(0xFF151C2E)
-private val Muted = Color(0xFF8B95AD)
-private val Accent = Color(0xFF3B63E0)   // M blue: normal
-private val Cold = Color(0xFF4FB3FF)     // M light blue: cold / below target
-private val Warn = Color(0xFFE8352B)     // M red: hot / redline
-private val Track = Color(0xFF1C2440)
-private val ColdDim = Color(0xFF1D3550)
-private val NormDim = Color(0xFF1E2A55)
-private val HotDim = Color(0xFF3A1E2A)
+// Design tokens follow the drive mode (see Theme): reading Theme.p inside composition
+// makes every screen recompose with the new palette when the mode changes.
+private val Bg: Color get() = Color(Theme.p.bg)
+private val CardBg: Color get() = Color(Theme.p.card)
+private val Muted: Color get() = Color(Theme.p.muted)
+private val Label: Color get() = Color(Theme.p.label)
+private val Accent: Color get() = Color(Theme.p.accent)
+private val Cold: Color get() = Color(Theme.p.light)
+private val Warn: Color get() = Color(Theme.p.warn)
+private val Track: Color get() = Color(Theme.p.track)
+private val ColdDim: Color get() = Color(Theme.p.lightDim)
+private val NormDim: Color get() = Color(Theme.p.accentDim)
+private val HotDim: Color get() = Color(Theme.p.warnDim)
+private val Danger = Color(0xFFE8352B) // disconnect / errors: always red, whatever the mode
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        Theme.load(this)
         setContent {
             MaterialTheme(
                 colorScheme = darkColorScheme(
@@ -142,10 +150,27 @@ private fun Header(vm: ObdViewModel) {
             Text(vm.status, color = Muted, fontSize = 12.sp, maxLines = 2)
         }
         if (vm.busy) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+        ModeChip()
         if (vm.connected) {
             TextButton(onClick = { vm.resetMinMax() }) { Text("تصفير") }
-            TextButton(onClick = { vm.disconnect() }) { Text("فصل", color = Warn) }
+            TextButton(onClick = { vm.disconnect() }) { Text("فصل", color = Danger) }
         }
+    }
+}
+
+/** Drive-mode chip: tap to cycle until the car's own mode value is read automatically. */
+@Composable
+private fun ModeChip() {
+    val ctx = LocalContext.current
+    Row(
+        Modifier.padding(horizontal = 4.dp).clip(RoundedCornerShape(16.dp)).background(CardBg)
+            .border(1.dp, Accent, RoundedCornerShape(16.dp))
+            .clickable { Theme.next(ctx) }.padding(horizontal = 10.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.size(8.dp).clip(RoundedCornerShape(4.dp)).background(Accent))
+        Spacer(Modifier.width(6.dp))
+        Text(Theme.mode.label, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
     }
 }
 
@@ -212,30 +237,58 @@ private fun Hero(vm: ObdViewModel) {
     val boost = v[Pids.BMW_BOOST] ?: v[Pids.BOOST]
     val cost = v[Pids.TRIP_COST]
     val knock = v[Pids.KNOCK]
+    val mode = Theme.mode
+    val sport = mode == DriveMode.SPORT
+    val bg = if (Theme.p.glow) {
+        // Sport: black card with red light bleeding in from both sides, like M clusters.
+        Modifier.background(CardBg).drawBehind {
+            val red = Color(0x55E1141E)
+            drawRect(Brush.radialGradient(listOf(red, Color.Transparent), center = Offset(0f, size.height * 0.55f), radius = size.height * 0.9f))
+            drawRect(Brush.radialGradient(listOf(red, Color.Transparent), center = Offset(size.width, size.height * 0.55f), radius = size.height * 0.9f))
+        }
+    } else Modifier.background(CardBg)
     Column(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(CardBg).padding(16.dp),
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).then(bg).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        RpmStrip(rpm ?: 0.0, Modifier.fillMaxWidth().height(12.dp))
+        RpmStrip(rpm ?: 0.0, Modifier.fillMaxWidth().height(when (mode) { DriveMode.ECO -> 8.dp; DriveMode.COMFORT -> 12.dp; DriveMode.SPORT -> 20.dp }))
         Row(verticalAlignment = Alignment.Bottom) {
-            Text(gear, color = Color.White, fontSize = 56.sp, fontWeight = FontWeight.Bold, lineHeight = 56.sp)
+            Text(gear, color = Color.White, fontSize = if (sport) 72.sp else 56.sp, fontWeight = FontWeight.Bold, lineHeight = if (sport) 72.sp else 56.sp)
             Spacer(Modifier.weight(1f))
             Column(horizontalAlignment = Alignment.End) {
                 Text("${rpm?.let { (it / 10).toInt() * 10 } ?: "—"} rpm", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
                 Text("${speed?.toInt() ?: "—"} km/h", color = Muted, fontSize = 16.sp)
             }
         }
-        Row(verticalAlignment = Alignment.Bottom) {
-            Text("البوست", color = Muted, fontSize = 14.sp)
-            Spacer(Modifier.weight(1f))
-            Text(boost?.let { fmt(it.value, 2) } ?: "—", color = Color.White, fontSize = 60.sp, fontWeight = FontWeight.SemiBold, lineHeight = 60.sp)
-            Text(" bar", color = Muted, fontSize = 16.sp, modifier = Modifier.padding(bottom = 8.dp))
+        if (mode == DriveMode.ECO) {
+            // ECO PRO: consumption is the headline, against this trip's average.
+            val f = vm.fuel
+            val now = f.instantL100
+            val avg = if (f.tripKm > 0.5) f.tripLiters / f.tripKm * 100 else null
+            Row(verticalAlignment = Alignment.Bottom) {
+                Text("الاستهلاك هسه", color = Muted, fontSize = 14.sp)
+                Spacer(Modifier.weight(1f))
+                Text(now?.let { fmt(it.coerceAtMost(99.9), 1) } ?: "—", color = Color.White, fontSize = 60.sp, fontWeight = FontWeight.SemiBold, lineHeight = 60.sp)
+                Text(" L/100", color = Muted, fontSize = 16.sp, modifier = Modifier.padding(bottom = 8.dp))
+            }
+            BoostBar(now ?: 0.0, avg ?: 0.0, Modifier.fillMaxWidth().height(10.dp), max = 25.0)
+            Text(
+                if (now == null) "واكف · يحسب لما تمشي" else "متوسط المشوار ${avg?.let { fmt(it, 1) } ?: "—"} · الخط الأبيض هو متوسطك",
+                color = Muted, fontSize = 12.sp,
+            )
+        } else {
+            Row(verticalAlignment = Alignment.Bottom) {
+                Text("البوست", color = Muted, fontSize = 14.sp)
+                Spacer(Modifier.weight(1f))
+                Text(boost?.let { fmt(it.value, 2) } ?: "—", color = Color.White, fontSize = if (sport) 72.sp else 60.sp, fontWeight = FontWeight.SemiBold, lineHeight = if (sport) 72.sp else 60.sp)
+                Text(" bar", color = Muted, fontSize = 16.sp, modifier = Modifier.padding(bottom = 8.dp))
+            }
+            BoostBar(boost?.value ?: 0.0, boost?.max ?: 0.0, Modifier.fillMaxWidth().height(if (sport) 16.dp else 12.dp))
+            Text(
+                "أعلى قراءة ${boost?.let { fmt(it.max, 2) } ?: "—"} bar",
+                color = Muted, fontSize = 12.sp,
+            )
         }
-        BoostBar(boost?.value ?: 0.0, boost?.max ?: 0.0, Modifier.fillMaxWidth().height(12.dp))
-        Text(
-            "أعلى قراءة ${boost?.let { fmt(it.max, 2) } ?: "—"} bar",
-            color = Muted, fontSize = 12.sp,
-        )
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             MiniStat("كلفة هالمشوار", cost?.let { Pids.def(Pids.TRIP_COST).text?.invoke(it.value) } ?: "—", if ((cost?.value ?: 0.0) >= 0) "دينار" else "بتبويب البانزين", Modifier.weight(1f))
             val kl = knock?.let { Pids.knockVerdictLevel(it.value) } ?: -1
@@ -259,6 +312,7 @@ private fun MiniStat(label: String, value: String, sub: String, modifier: Modifi
 /** 20 segments, M colours by zone; the whole strip turns red from 6200 rpm (shift point). */
 @Composable
 private fun RpmStrip(rpm: Double, modifier: Modifier) {
+    val pal = Theme.p
     Canvas(modifier) {
         val n = 20
         val gap = 3.dp.toPx()
@@ -267,10 +321,18 @@ private fun RpmStrip(rpm: Double, modifier: Modifier) {
         val shift = rpm >= 6200
         for (i in 0 until n) {
             val zone = if (i < 12) 0 else if (i < 17) 1 else 2
-            val c = when {
-                shift -> Warn
-                i < lit -> listOf(Cold, Accent, Warn)[zone]
-                else -> listOf(ColdDim, NormDim, HotDim)[zone]
+            val on = shift || i < lit
+            val c = Color(when {
+                shift -> pal.shift
+                on -> pal.stripLit[zone]
+                else -> pal.stripDim[zone]
+            })
+            if (on && pal.glow) {
+                // Sport: soft halo behind each lit segment.
+                val g = 3.dp.toPx()
+                drawRoundRect(c.copy(alpha = 0.35f), topLeft = Offset(i * (w + gap) - g, -g),
+                    size = androidx.compose.ui.geometry.Size(w + 2 * g, size.height + 2 * g),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(4.dp.toPx()))
             }
             // Strip always reads left to right, like the tachometer.
             drawRoundRect(c, topLeft = androidx.compose.ui.geometry.Offset(i * (w + gap), 0f),
@@ -281,13 +343,23 @@ private fun RpmStrip(rpm: Double, modifier: Modifier) {
 }
 
 @Composable
-private fun BoostBar(value: Double, peak: Double, modifier: Modifier) {
-    val max = 1.5
+private fun BoostBar(value: Double, peak: Double, modifier: Modifier, max: Double = 1.5) {
+    val track = Track
+    val accent = Accent
+    val glow = Theme.p.glow
     Canvas(modifier) {
         val r = androidx.compose.ui.geometry.CornerRadius(3.dp.toPx())
-        drawRoundRect(Track, cornerRadius = r)
+        drawRoundRect(track, cornerRadius = r)
         val f = (value.coerceIn(0.0, max) / max).toFloat()
-        drawRoundRect(Accent, size = androidx.compose.ui.geometry.Size(size.width * f, size.height), cornerRadius = r)
+        val fillSize = androidx.compose.ui.geometry.Size(size.width * f, size.height)
+        if (glow) {
+            // Sport: dark-to-bright red sweep with a halo.
+            val g = 4.dp.toPx()
+            drawRoundRect(accent.copy(alpha = 0.3f), topLeft = Offset(-g, -g), size = androidx.compose.ui.geometry.Size(fillSize.width + 2 * g, size.height + 2 * g), cornerRadius = r)
+            drawRoundRect(Brush.horizontalGradient(listOf(Color(0xFF5C0A10), accent, Color(0xFFFF4B4B)), endX = size.width), size = fillSize, cornerRadius = r)
+        } else {
+            drawRoundRect(accent, size = fillSize, cornerRadius = r)
+        }
         val p = (peak.coerceIn(0.0, max) / max).toFloat() * size.width
         drawRect(Color.White, topLeft = androidx.compose.ui.geometry.Offset(p - 1.5.dp.toPx(), -4.dp.toPx()),
             size = androidx.compose.ui.geometry.Size(3.dp.toPx(), size.height + 8.dp.toPx()))
@@ -311,7 +383,7 @@ private fun TempRails(vm: ObdViewModel) {
         for (t in rows) {
             val z = when { t.value == null -> 1; t.value < t.a -> 0; t.value <= t.c -> 1; else -> 2 }
             Row(verticalAlignment = Alignment.Bottom) {
-                Text(t.label, color = Color(0xFFC4CBDA), fontSize = 14.sp)
+                Text(t.label, color = Label, fontSize = 14.sp)
                 Text(" · " + listOf("بارد", "طبيعي", "حار")[z], color = Muted, fontSize = 12.sp)
                 Spacer(Modifier.weight(1f))
                 Text(t.value?.let { fmt(it, 0) } ?: "—", color = if (z == 2) Warn else Color.White, fontSize = 24.sp, fontWeight = FontWeight.SemiBold)
@@ -586,7 +658,7 @@ private fun Console(vm: ObdViewModel) {
             listItems(vm.log.reversed()) { line ->
                 Text(
                     line, fontFamily = FontFamily.Monospace, fontSize = 12.sp,
-                    color = if (line.startsWith("ERROR")) Warn else if (line.startsWith(">")) Accent else Color.White,
+                    color = if (line.startsWith("ERROR")) Danger else if (line.startsWith(">")) Accent else Color.White,
                 )
             }
         }

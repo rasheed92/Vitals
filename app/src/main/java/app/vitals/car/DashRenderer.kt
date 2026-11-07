@@ -3,12 +3,17 @@ package app.vitals.car
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.LinearGradient
 import android.graphics.Paint
+import android.graphics.RadialGradient
 import android.graphics.Rect
 import android.graphics.RectF
+import android.graphics.Shader
 import android.graphics.Typeface
+import app.vitals.DriveMode
 import app.vitals.ObdViewModel
 import app.vitals.Pids
+import app.vitals.Theme
 import java.util.Locale
 
 /**
@@ -17,17 +22,38 @@ import java.util.Locale
  * rails on the left, and a row of small readings along the bottom.
  */
 class DashRenderer(@Suppress("unused") private val ctx: Context, private val engine: ObdViewModel) {
-    private val bg = Color.parseColor("#0E1322")
-    private val line = Color.parseColor("#222B44")
+    // Palette is re-read every frame so the car screen follows the drive mode immediately.
+    private var bg = 0
+    private var line = 0
     private val text = Color.parseColor("#E9EDF5")
-    private val muted = Color.parseColor("#8B95AD")
-    private val label = Color.parseColor("#C4CBDA")
-    private val blue = Color.parseColor("#3B63E0")
-    private val cold = Color.parseColor("#4FB3FF")
-    private val red = Color.parseColor("#E8352B")
-    private val track = Color.parseColor("#1C2440")
-    private val dims = intArrayOf(Color.parseColor("#1D3550"), Color.parseColor("#1E2A55"), Color.parseColor("#3A1E2A"))
-    private val lits = intArrayOf(cold, blue, red)
+    private var muted = 0
+    private var label = 0
+    private var blue = 0   // the mode's accent ("normal")
+    private var cold = 0
+    private var red = 0    // the mode's "hot" colour
+    private var track = 0
+    private var dims = IntArray(3)
+    private var stripLit = IntArray(3)
+    private var stripDim = IntArray(3)
+    private var shiftColor = 0
+    private var glow = false
+
+    private fun loadPalette() {
+        val p = Theme.p
+        bg = p.bg.toInt(); muted = p.muted.toInt(); label = p.label.toInt()
+        blue = p.accent.toInt(); cold = p.light.toInt(); red = p.warn.toInt(); track = p.track.toInt()
+        line = blend(p.card.toInt(), p.label.toInt(), 0.12f)
+        dims = intArrayOf(p.lightDim.toInt(), p.accentDim.toInt(), p.warnDim.toInt())
+        stripLit = p.stripLit.map { it.toInt() }.toIntArray()
+        stripDim = p.stripDim.map { it.toInt() }.toIntArray()
+        shiftColor = p.shift.toInt(); glow = p.glow
+    }
+
+    private fun blend(a: Int, b: Int, t: Float) = Color.rgb(
+        (Color.red(a) + (Color.red(b) - Color.red(a)) * t).toInt(),
+        (Color.green(a) + (Color.green(b) - Color.green(a)) * t).toInt(),
+        (Color.blue(a) + (Color.blue(b) - Color.blue(a)) * t).toInt(),
+    )
 
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
     private val num = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -40,7 +66,18 @@ class DashRenderer(@Suppress("unused") private val ctx: Context, private val eng
     private fun fmt(x: Double, d: Int) = String.format(Locale.US, "%.${d}f", x)
 
     fun draw(c: Canvas, w: Int, h: Int, area: Rect) {
+        loadPalette()
+        val mode = Theme.mode
         c.drawColor(bg)
+        if (glow) {
+            // Sport: red light bleeding in from both sides, like M clusters.
+            val r = h * 0.9f
+            for (cx in floatArrayOf(0f, w.toFloat())) {
+                fill.shader = RadialGradient(cx, h * 0.55f, r, Color.argb(80, 225, 20, 30), Color.TRANSPARENT, Shader.TileMode.CLAMP)
+                c.drawRect(0f, 0f, w.toFloat(), h.toFloat(), fill)
+            }
+            fill.shader = null
+        }
         val pad = area.height() * 0.05f
         val left = area.left + pad
         val right = area.right - pad
@@ -63,14 +100,18 @@ class DashRenderer(@Suppress("unused") private val ctx: Context, private val eng
         val segW = (width - gap * (n - 1)) / n
         val lit = (rpm.coerceIn(0.0, 7000.0) / 7000.0 * n).toInt()
         val shift = rpm >= 6200
+        val stripH = when (mode) { DriveMode.ECO -> 8f; DriveMode.COMFORT -> 14f; DriveMode.SPORT -> 24f } * s
         for (i in 0 until n) {
             val z = if (i < 16) 0 else if (i < 23) 1 else 2
-            fill.color = if (shift) red else if (i < lit) lits[z] else dims[z]
+            val on = shift || i < lit
+            fill.color = if (shift) shiftColor else if (on) stripLit[z] else stripDim[z]
+            if (on && glow) fill.setShadowLayer(10 * s, 0f, 0f, fill.color)
             val x = left + i * (segW + gap)
-            c.drawRoundRect(RectF(x, top, x + segW, top + 14 * s), 2 * s, 2 * s, fill)
+            c.drawRoundRect(RectF(x, top, x + segW, top + stripH), 2 * s, 2 * s, fill)
+            fill.clearShadowLayer()
         }
 
-        val mainTop = top + 40 * s
+        val mainTop = top + 26 * s + stripH
         val mainBottom = bottom - 90 * s
         val colBoostL = right - width * 0.36f
         val colMidL = colBoostL - width * 0.24f
@@ -81,27 +122,53 @@ class DashRenderer(@Suppress("unused") private val ctx: Context, private val eng
         c.drawRect(left, mainBottom + 14 * s, right, mainBottom + 15 * s, fill)
 
         // --- boost (right column) ---
-        val boost = v(Pids.BMW_BOOST) ?: v(Pids.BOOST)
-        val peak = (engine.values[Pids.BMW_BOOST] ?: engine.values[Pids.BOOST])?.max
+        // ECO PRO puts consumption in the hero spot; Comfort and Sport put boost there.
+        val eco = mode == DriveMode.ECO
+        val f0 = engine.fuel
+        val heroValue: Double?
+        val heroMark: Double?
+        val heroMax: Double
+        val heroLabel: String
+        val heroUnit: String
+        val heroNote: String?
+        if (eco) {
+            heroValue = f0.instantL100?.coerceAtMost(99.9)
+            heroMark = if (f0.tripKm > 0.5) f0.tripLiters / f0.tripKm * 100 else null
+            heroMax = 25.0; heroLabel = "الاستهلاك هسه"; heroUnit = "L/100"
+            heroNote = if (heroValue == null) "واكف" else heroMark?.let { "متوسط المشوار " + fmt(it, 1) }
+        } else {
+            heroValue = v(Pids.BMW_BOOST) ?: v(Pids.BOOST)
+            heroMark = (engine.values[Pids.BMW_BOOST] ?: engine.values[Pids.BOOST])?.max
+            heroMax = 1.5; heroLabel = "البوست"; heroUnit = "bar"
+            heroNote = heroMark?.let { "أعلى قراءة " + fmt(it, 2) }
+        }
         txt.color = label; txt.textSize = 18 * s; txt.textAlign = Paint.Align.RIGHT
-        c.drawText("البوست", right, mainTop + 24 * s, txt)
-        num.color = text; num.textSize = 120 * s; num.textAlign = Paint.Align.RIGHT
-        c.drawText(boost?.let { fmt(it, 2) } ?: "—", right, mainTop + 160 * s, num)
+        c.drawText(heroLabel, right, mainTop + 24 * s, txt)
+        num.color = text; num.textSize = (if (mode == DriveMode.SPORT) 132 else 120) * s; num.textAlign = Paint.Align.RIGHT
+        c.drawText(heroValue?.let { fmt(it, if (eco) 1 else 2) } ?: "—", right, mainTop + 160 * s, num)
         txt.color = muted; txt.textSize = 20 * s; txt.textAlign = Paint.Align.LEFT
-        c.drawText("bar", colBoostL + 30 * s, mainTop + 160 * s, txt)
+        c.drawText(heroUnit, colBoostL + 30 * s, mainTop + 160 * s, txt)
         val barL = colBoostL + 30 * s
         val barT = mainTop + 190 * s
+        val barH = when (mode) { DriveMode.ECO -> 10f; DriveMode.COMFORT -> 16f; DriveMode.SPORT -> 20f } * s
         fill.color = track
-        c.drawRoundRect(RectF(barL, barT, right, barT + 16 * s), 3 * s, 3 * s, fill)
-        val f = ((boost ?: 0.0).coerceIn(0.0, 1.5) / 1.5).toFloat()
-        fill.color = blue
-        c.drawRoundRect(RectF(barL, barT, barL + (right - barL) * f, barT + 16 * s), 3 * s, 3 * s, fill)
-        peak?.let {
-            val px = barL + (right - barL) * (it.coerceIn(0.0, 1.5) / 1.5).toFloat()
+        c.drawRoundRect(RectF(barL, barT, right, barT + barH), 3 * s, 3 * s, fill)
+        val f = ((heroValue ?: 0.0).coerceIn(0.0, heroMax) / heroMax).toFloat()
+        val fillR = RectF(barL, barT, barL + (right - barL) * f, barT + barH)
+        if (glow) {
+            fill.shader = LinearGradient(barL, 0f, right, 0f, intArrayOf(Color.parseColor("#5C0A10"), blue, Color.parseColor("#FF4B4B")), floatArrayOf(0f, 0.7f, 1f), Shader.TileMode.CLAMP)
+            fill.setShadowLayer(14 * s, 0f, 0f, blue)
+        } else fill.color = blue
+        c.drawRoundRect(fillR, 3 * s, 3 * s, fill)
+        fill.shader = null; fill.clearShadowLayer()
+        heroMark?.let {
+            val px = barL + (right - barL) * (it.coerceIn(0.0, heroMax) / heroMax).toFloat()
             fill.color = text
-            c.drawRect(px - 1.5f * s, barT - 7 * s, px + 1.5f * s, barT + 23 * s, fill)
+            c.drawRect(px - 1.5f * s, barT - 7 * s, px + 1.5f * s, barT + barH + 7 * s, fill)
+        }
+        heroNote?.let {
             txt.color = muted; txt.textSize = 16 * s; txt.textAlign = Paint.Align.RIGHT
-            c.drawText("أعلى قراءة " + fmt(it, 2), right, barT + 52 * s, txt)
+            c.drawText(it, right, barT + barH + 36 * s, txt)
         }
 
         // --- gear / rpm / speed (middle) ---
@@ -109,12 +176,16 @@ class DashRenderer(@Suppress("unused") private val ctx: Context, private val eng
         txt.color = label; txt.textSize = 18 * s; txt.textAlign = Paint.Align.CENTER
         c.drawText("الگير", mid, mainTop + 24 * s, txt)
         val gear = engine.values[0x2020]?.let { Pids.def(0x2020).text?.invoke(it.value) } ?: "—"
-        num.color = text; num.textSize = 110 * s; num.textAlign = Paint.Align.CENTER
+        num.color = text; num.textSize = (if (mode == DriveMode.SPORT) 130 else 110) * s; num.textAlign = Paint.Align.CENTER
         c.drawText(gear, mid, mainTop + 150 * s, num)
         num.textSize = 30 * s
         c.drawText("${(rpm / 10).toInt() * 10} rpm", mid, mainTop + 200 * s, num)
         num.color = muted
         c.drawText("${v(0x0D)?.toInt() ?: "—"} km/h", mid, mainTop + 240 * s, num)
+        txt.color = blue; txt.textSize = 15 * s; txt.textAlign = Paint.Align.CENTER
+        txt.isFakeBoldText = true
+        c.drawText(mode.label, mid, mainTop + 276 * s, txt)
+        txt.isFakeBoldText = false
 
         // --- temperature rails (left column) ---
         val rails = listOf(
@@ -152,7 +223,13 @@ class DashRenderer(@Suppress("unused") private val ctx: Context, private val eng
         val cost = engine.values[Pids.TRIP_COST]?.let { Pids.def(Pids.TRIP_COST).text?.invoke(it.value) } ?: "—"
         val knock = engine.values[Pids.KNOCK]?.let { Pids.def(Pids.KNOCK).text?.invoke(it.value) } ?: "يحتاج دوس"
         val misfire = (1..4).sumOf { (v(Pids.MISFIRE + it) ?: 0.0).toInt() }
-        val cells = listOf(
+        val cells = if (eco) listOf(
+            "كلفة المشوار" to "$cost د",
+            "المسافة" to fmt(f0.tripKm, 1) + " km",
+            "الوقوف بالزحمة" to "${(f0.idleSeconds / 60).toInt()} د",
+            "جودة البانزين" to knock,
+            "البطارية" to (v(0x42)?.let { fmt(it, 1) + " V" } ?: "—"),
+        ) else listOf(
             "كلفة المشوار" to "$cost د",
             "علامة الـ Knock" to knock,
             "Misfire" to misfire.toString(),
