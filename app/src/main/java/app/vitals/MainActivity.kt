@@ -274,7 +274,7 @@ private fun BmwScanner(vm: ObdViewModel) {
                 Button(onClick = { vm.bmwWatch(ecu) }, enabled = vm.canWatch(ecu)) { Text("مراقبة") }
             }
             Spacer(Modifier.width(8.dp))
-            TextButton(onClick = { clipboard.setText(AnnotatedString(vm.bmwReport())) }, enabled = vm.bmwHits.isNotEmpty()) {
+            TextButton(onClick = { clipboard.setText(AnnotatedString(vm.bmwReport())) }, enabled = vm.bmwHits.isNotEmpty() || vm.watchReport.isNotEmpty()) {
                 Text("نسخ النتائج")
             }
         }
