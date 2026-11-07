@@ -34,6 +34,8 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
     val log = mutableStateListOf<String>()
 
     private var conn: ElmConnection? = null
+    val fuel = FuelTracker(app)
+    private var lastFuelTick = 0L
     private var pollJob: Job? = null
 
     private val adapter: BluetoothAdapter?
@@ -177,6 +179,14 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
                     put(Pids.BOOST, (map.value - baro) / 100.0)
                 }
                 val now = System.currentTimeMillis()
+                if (lastFuelTick > 0) {
+                    fuel.onSample(
+                        values[0x0C]?.value, values[0x04]?.value, values[0x0E]?.value,
+                        values[0x10]?.value, values[0x0D]?.value, values[0x2F]?.value,
+                        (now - lastFuelTick) / 1000.0,
+                    )
+                }
+                lastFuelTick = now
                 try {
                     if (now - lastDme > 1500) { lastDme = now; pollBmw(c, 0x12) }
                     if (now - lastEgs > 4000) { lastEgs = now; pollBmw(c, 0x18) }
@@ -446,6 +456,8 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun disconnect() {
+        fuel.save()
+        lastFuelTick = 0L
         bmwJob?.cancel()
         pollJob?.cancel()
         pollJob = null

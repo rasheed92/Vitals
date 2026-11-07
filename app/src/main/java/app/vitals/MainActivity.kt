@@ -30,6 +30,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -55,6 +57,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -104,12 +107,14 @@ fun App(vm: ObdViewModel = viewModel()) {
                 else -> {
                     TabRow(selectedTabIndex = tab, containerColor = Bg) {
                         Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("البيانات") })
-                        Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("BMW") })
-                        Tab(selected = tab == 2, onClick = { tab = 2 }, text = { Text("الكونسول") })
+                        Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("البانزين") })
+                        Tab(selected = tab == 2, onClick = { tab = 2 }, text = { Text("BMW") })
+                        Tab(selected = tab == 3, onClick = { tab = 3 }, text = { Text("الكونسول") })
                     }
                     when (tab) {
                         0 -> Dashboard(vm)
-                        1 -> BmwScanner(vm)
+                        1 -> FuelScreen(vm.fuel)
+                        2 -> BmwScanner(vm)
                         else -> Console(vm)
                     }
                 }
@@ -217,6 +222,123 @@ private fun Sparkline(h: List<Float>, modifier: Modifier) {
             if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
         }
         drawPath(path, Accent, style = Stroke(width = 2.dp.toPx()))
+    }
+}
+
+private fun iqd(v: Double) = String.format(Locale.US, "%,d", Math.round(v / 250.0) * 250)
+
+@Composable
+private fun FuelRow(label: String, value: String) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+        Text(label, color = Muted, fontSize = 14.sp)
+        Text(value, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+    }
+}
+
+@Composable
+private fun FuelCard(title: String, content: @Composable () -> Unit) {
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(CardBg).padding(14.dp)) {
+        Text(title, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(6.dp))
+        content()
+    }
+}
+
+@Composable
+private fun FuelScreen(f: FuelTracker) {
+    var priceText by remember { mutableStateOf(if (f.price > 0) f.price.toString() else "") }
+    var stationText by remember { mutableStateOf("") }
+    val hasPrice = f.price > 0
+    fun money(v: Double) = if (hasPrice) iqd(v) + " دينار" else "حط سعر اللتر"
+
+    if (f.askStation) {
+        AlertDialog(
+            onDismissRequest = { f.dismissStation() },
+            title = { Text("عبّيت بانزين؟") },
+            text = {
+                Column {
+                    Text("اكتب اسم المحطة حتى تقارن جودة البانزين بين المحطات.", color = Muted, fontSize = 14.sp)
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(value = stationText, onValueChange = { stationText = it }, singleLine = true, label = { Text("اسم المحطة") })
+                }
+            },
+            confirmButton = { TextButton(onClick = { f.nameStation(stationText); stationText = "" }) { Text("حفظ") } },
+            dismissButton = { TextButton(onClick = { f.dismissStation() }) { Text("بعدين") } },
+        )
+    }
+
+    Column(
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        OutlinedTextField(
+            value = priceText,
+            onValueChange = { t -> priceText = t.filter { it.isDigit() }.take(6); f.setPrice(priceText.toIntOrNull() ?: 0) },
+            singleLine = true, modifier = Modifier.fillMaxWidth(),
+            label = { Text("سعر لتر البانزين (دينار)") },
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+        )
+
+        val t = f.current
+        FuelCard("جودة البانزين") {
+            val station = t.station.ifEmpty { "بدون اسم" }
+            FuelRow("التانكي الحالي", station)
+            val sc = t.score
+            if (sc == null) {
+                FuelRow("الحالة", "يجمع بيانات ${t.n * 100 / FuelTracker.MIN_SAMPLES}%")
+                Text("يحتاج سواقة عادية فيها دوس متوسط، مو سلانسيه بس.", color = Muted, fontSize = 12.sp)
+            } else {
+                val verdict = when {
+                    sc > 0.5 -> "زين، أحسن من المعتاد"
+                    sc < -0.5 -> "أردأ من المعتاد"
+                    else -> "طبيعي"
+                }
+                FuelRow("التقييم", verdict)
+                FuelRow("الفرق بالإشعال", String.format(Locale.US, "%+.1f°", sc))
+                f.previous?.score?.let { ps ->
+                    val d = sc - ps
+                    val name = f.previous?.station?.ifEmpty { "التعبئة السابقة" } ?: "التعبئة السابقة"
+                    FuelRow("مقارنة ويا $name", if (d >= 0) String.format(Locale.US, "أحسن بـ %.1f°", d) else String.format(Locale.US, "أردأ بـ %.1f°", -d))
+                }
+            }
+            Row {
+                TextButton(onClick = { stationText = ""; f.newTank() }) { Text("عبّيت هسه") }
+                TextButton(onClick = { stationText = t.station; f.renameCurrent() }) { Text("سمّي المحطة") }
+            }
+        }
+
+        FuelCard("هالمشوار") {
+            FuelRow("المسافة", String.format(Locale.US, "%.1f كم", f.tripKm))
+            FuelRow("البانزين", String.format(Locale.US, "%.2f لتر", f.tripLiters))
+            if (f.tripKm > 1) FuelRow("المعدل", String.format(Locale.US, "%.1f لتر/100كم", f.tripLiters / f.tripKm * 100))
+            f.instantL100?.let { FuelRow("هسه", String.format(Locale.US, "%.1f لتر/100كم", it)) }
+            FuelRow("الكلفة", money(f.tripCost()))
+        }
+
+        FuelCard("الوقوف بالزحمة") {
+            FuelRow("وقت الوقوف والمحرك شغّال", String.format(Locale.US, "%d دقيقة", (f.idleSeconds / 60).toInt()))
+            FuelRow("بانزين صرفته وأنت واگف", String.format(Locale.US, "%.2f لتر", f.idleLiters))
+            FuelRow("كلفته", money(f.idleCost()))
+        }
+
+        FuelCard("هالشهر") {
+            FuelRow("المسافة", String.format(Locale.US, "%.0f كم", f.monthKm))
+            FuelRow("البانزين", String.format(Locale.US, "%.1f لتر", f.monthLiters))
+            FuelRow("الكلفة", money(f.monthCost()))
+        }
+
+        val past = f.tanks.dropLast(1).reversed().filter { it.score != null }
+        if (past.isNotEmpty()) {
+            FuelCard("التعبئات السابقة") {
+                for (p in past.take(10)) {
+                    FuelRow(p.station.ifEmpty { "بدون اسم" }, String.format(Locale.US, "%+.1f°", p.score ?: 0.0))
+                }
+            }
+        }
+        Text(
+            "التقدير محسوب من كمية الهواء، فالكلفة تقريبية (±10%). جودة البانزين تنقاس بتأخير الإشعال: الرقم السالب يعني المحرك سحب الإشعال أكثر من عادته.",
+            color = Muted, fontSize = 11.sp,
+        )
     }
 }
 
