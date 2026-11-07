@@ -192,13 +192,13 @@ private fun GaugeCard(def: PidDef, r: Reading?) {
     Column(Modifier.clip(RoundedCornerShape(14.dp)).background(CardBg).padding(12.dp)) {
         Text(def.label, color = Muted, fontSize = 13.sp, maxLines = 1)
         Row(verticalAlignment = Alignment.Bottom) {
-            Text(r?.let { fmt(it.value, def.decimals) } ?: "—", color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Bold)
+            Text(r?.let { def.text?.invoke(it.value) ?: fmt(it.value, def.decimals) } ?: "—", color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.width(4.dp))
             Text(def.unit, color = Muted, fontSize = 13.sp, modifier = Modifier.padding(bottom = 5.dp))
         }
         Sparkline(r?.history ?: emptyList(), Modifier.fillMaxWidth().height(34.dp))
         Text(
-            if (r != null) "أقل ${fmt(r.min, def.decimals)} · أعلى ${fmt(r.max, def.decimals)}" else " ",
+            if (r != null && def.text == null) "أقل ${fmt(r.min, def.decimals)} · أعلى ${fmt(r.max, def.decimals)}" else " ",
             color = Muted, fontSize = 11.sp,
         )
     }

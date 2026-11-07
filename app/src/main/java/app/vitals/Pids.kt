@@ -8,6 +8,8 @@ data class PidDef(
     val decimals: Int,
     val fast: Boolean,
     val decode: (IntArray) -> Double,
+    /** Shown instead of the number when set (e.g. P/R/N/D). */
+    val text: ((Double) -> String)? = null,
 )
 
 data class Reading(val value: Double, val min: Double, val max: Double, val history: List<Float>)
@@ -55,6 +57,12 @@ object Pids {
     private fun d(key: Int, label: String, unit: String, dec: Int, fast: Boolean) =
         PidDef(key, label, unit, 0, dec, fast) { 0.0 }
 
+    /** EGS 4605, mapped on this car: 8=P, 6=R, 4=N, 9=D. Other codes shown raw until known. */
+    private fun selector(v: Double): String = when (v.toInt()) {
+        8 -> "P"; 6 -> "R"; 4 -> "N"; 9 -> "D"
+        else -> "؟" + v.toInt()
+    }
+
     private fun kelvin(raw: Double) = raw / 10.0 - 273.15
 
     val bmw: List<BmwPid> = listOf(
@@ -67,7 +75,7 @@ object Pids {
         BmwPid(0x12, 0x4A4A, d(0x2012, "توقيت سلندر 2 (اختبار)", "°", 1, true), signed = true, test = true) { it * 0.075 },
         BmwPid(0x12, 0x4A4C, d(0x2013, "توقيت سلندر 3 (اختبار)", "°", 1, true), signed = true, test = true) { it * 0.075 },
         BmwPid(0x12, 0x4A4D, d(0x2014, "توقيت سلندر 4 (اختبار)", "°", 1, true), signed = true, test = true) { it * 0.075 },
-        BmwPid(0x18, 0x4605, d(0x2020, "وضع الگير · خام (اختبار)", "", 0, true), test = true) { it },
+        BmwPid(0x18, 0x4605, PidDef(0x2020, "وضع الگير", "", 0, 0, true, { 0.0 }) { selector(it) }) { it },
         BmwPid(0x18, 0x4301, d(0x2021, "زيت الگير؟ 4301 (اختبار)", "", 0, false), test = true) { it },
         BmwPid(0x18, 0x41B4, d(0x2022, "زيت الگير؟ 41B4 (اختبار)", "", 0, false), firstByteOnly = true, test = true) { it },
         BmwPid(0x18, 0x41A1, d(0x2023, "زيت الگير؟ 41A1 (اختبار)", "", 0, false), firstByteOnly = true, test = true) { it },
