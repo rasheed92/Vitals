@@ -24,6 +24,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -229,7 +231,7 @@ private fun BmwScanner(vm: ObdViewModel) {
     Column(Modifier.fillMaxSize().padding(12.dp)) {
         Text(
             "يقرا قيم BMW الخاصة من الكمبيوتر مباشرة (قراءة بس، ما يغيّر شي). خلي المحرك شغّال، " +
-                "والبيانات الحية تتوقف وقت الفحص.",
+                "والبيانات الحية تتوقف وقت الفحص. بعد الفحص اضغط مراقبة، وخلي السيارة P ودوس بنزين وعوف لحد ما تخلص.",
             color = Muted, fontSize = 12.sp,
         )
         Spacer(Modifier.height(8.dp))
@@ -268,6 +270,8 @@ private fun BmwScanner(vm: ObdViewModel) {
                     val f = from.toIntOrNull(16); val t = to.toIntOrNull(16)
                     if (f != null && t != null) vm.bmwScan(ecu, f, t)
                 }) { Text("ابدأ الفحص") }
+                Spacer(Modifier.width(6.dp))
+                Button(onClick = { vm.bmwWatch(ecu) }, enabled = vm.bmwHits.any { it.ecu == ecu }) { Text("مراقبة") }
             }
             Spacer(Modifier.width(8.dp))
             TextButton(onClick = { clipboard.setText(AnnotatedString(vm.bmwReport())) }, enabled = vm.bmwHits.isNotEmpty()) {
@@ -276,6 +280,12 @@ private fun BmwScanner(vm: ObdViewModel) {
         }
         Text(vm.bmwProgress, color = Muted, fontSize = 12.sp)
         Spacer(Modifier.height(6.dp))
+        if (vm.watchReport.isNotEmpty()) {
+            Text(
+                vm.watchReport, fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = Accent,
+                modifier = Modifier.fillMaxWidth().height(220.dp).verticalScroll(rememberScrollState()),
+            )
+        }
         LazyColumn(Modifier.weight(1f), reverseLayout = true) {
             listItems(vm.bmwHits.reversed()) { h ->
                 Text(h.line, fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = Color.White)

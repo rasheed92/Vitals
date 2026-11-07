@@ -18,6 +18,7 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -243,7 +244,128 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
 
     fun bmwStop() { bmwJob?.cancel() }
 
+    // --- Watch: re-read short DIDs, see which move, and match them against standard OBD values ---
+    private class Ref(val name: String, val did: Int, val fast: Boolean, val decode: (IntArray) -> Double)
+
+    // UDS F4xx = OBD mode-01 PID xx, readable over BMW addressing, so refs and DIDs share one session.
+    private val refs = listOf(
+        Ref("الدورات rpm", 0xF40C, true) { (it[0] * 256 + it[1]) / 4.0 },
+        Ref("ضغط المانيفولد kPa", 0xF40B, true) { it[0].toDouble() },
+        Ref("الثروتل %", 0xF411, true) { it[0] * 100 / 255.0 },
+        Ref("الحمل %", 0xF404, true) { it[0] * 100 / 255.0 },
+        Ref("حرارة الماي °C", 0xF405, false) { it[0] - 40.0 },
+        Ref("حرارة الزيت °C", 0xF45C, false) { it[0] - 40.0 },
+        Ref("حرارة السحب °C", 0xF40F, false) { it[0] - 40.0 },
+    )
+
+    var watchReport by mutableStateOf(""); private set
+
+    fun bmwWatch(ecu: Int, rounds: Int = 10) {
+        val c = conn ?: return
+        if (bmwRunning) return
+        val cands = bmwHits.filter { it.ecu == ecu && it.data.size in 1..4 }.map { it.did }.distinct()
+        if (cands.isEmpty()) { bmwProgress = "سوّي فحص ${ecuName(ecu)} أول"; return }
+        bmwRunning = true
+        watchReport = ""
+        bmwJob = viewModelScope.launch {
+            val n = refs.size
+            val refVal = DoubleArray(n) { Double.NaN }
+            val refOk = BooleanArray(n)
+            val samples = HashMap<Int, MutableList<DoubleArray>>()
+            val first = HashMap<Int, Long>()
+            val changed = LinkedHashSet<Int>()
+            try {
+                for (round in 0 until rounds) {
+                    if (!isActive) break
+                    val list = if (round < 2) cands else cands.filter { it in changed }
+                    if (list.isEmpty()) break
+                    c.bmw(ecu) { read ->
+                        suspend fun readRefs(fastOnly: Boolean) {
+                            for ((i, r) in refs.withIndex()) {
+                                if (fastOnly && !r.fast) continue
+                                if (round > 0 && !refOk[i]) continue
+                                val res = read(r.did)
+                                if (res is Uds.Positive) {
+                                    try { refVal[i] = r.decode(res.data); refOk[i] = true } catch (_: Exception) {}
+                                }
+                            }
+                        }
+                        readRefs(false)
+                        for ((k, did) in list.withIndex()) {
+                            if (!currentCoroutineContext().isActive) break
+                            if (k > 0 && k % 12 == 0) readRefs(true)
+                            val d = (read(did) as? Uds.Positive)?.data ?: continue
+                            if (d.isEmpty()) continue
+                            var u = 0L
+                            for (b in d) u = (u shl 8) or b.toLong()
+                            val bits = d.size * 8
+                            val sg = if (u >= (1L shl (bits - 1))) u - (1L shl bits) else u
+                            if (u != first.getOrPut(did) { u }) changed.add(did)
+                            samples.getOrPut(did) { mutableListOf() }
+                                .add(refVal.copyOf() + doubleArrayOf(u.toDouble(), sg.toDouble()))
+                            if (k % 8 == 0) bmwProgress =
+                                "مراقبة ${ecuName(ecu)}: جولة ${round + 1}/$rounds · ${list.size} قيمة · تتغير ${changed.size}"
+                        }
+                    }
+                }
+                watchReport = watchText(ecu, samples, changed, refOk)
+                addLog(watchReport)
+                bmwProgress = "خلصت المراقبة · ${changed.size} قيمة تتغير"
+            } catch (e: IOException) {
+                lost(e)
+            } catch (e: Exception) {
+                bmwProgress = "توقف: ${e.message}"
+            } finally {
+                bmwRunning = false
+            }
+        }
+    }
+
+    private class Fit(val r: Double, val a: Double, val b: Double)
+
+    /** Least squares y = a*x + b with Pearson r, or null if x or y is flat. */
+    private fun fit(x: List<Double>, y: List<Double>): Fit? {
+        val m = x.size
+        if (m < 4) return null
+        val mx = x.average(); val my = y.average()
+        var sxy = 0.0; var sxx = 0.0; var syy = 0.0
+        for (i in 0 until m) {
+            val dx = x[i] - mx; val dy = y[i] - my
+            sxy += dx * dy; sxx += dx * dx; syy += dy * dy
+        }
+        if (sxx < 1e-9 || syy < 1e-9) return null
+        val a = sxy / sxx
+        return Fit(sxy / Math.sqrt(sxx * syy), a, my - a * mx)
+    }
+
+    private fun watchText(ecu: Int, samples: Map<Int, List<DoubleArray>>, changed: Set<Int>, refOk: BooleanArray): String =
+        buildString {
+            val n = refs.size
+            append("Vitals BMW watch ${ecuName(ecu)}\n")
+            append("refs: ").append(refs.filterIndexed { i, _ -> refOk[i] }.joinToString(", ") { it.name }.ifEmpty { "ماكو" }).append('\n')
+            for (did in changed.sorted()) {
+                val ss = samples[did] ?: continue
+                val raw = ss.map { it[n] }
+                append(String.format(Locale.US, "%04X  min=%.0f max=%.0f n=%d", did, raw.min(), raw.max(), ss.size))
+                var bestName = ""; var best: Fit? = null; var signed = false
+                for (i in 0 until n) {
+                    if (!refOk[i]) continue
+                    for (col in listOf(n, n + 1)) {
+                        val pts = ss.filter { !it[i].isNaN() }
+                        val f = fit(pts.map { it[col] }, pts.map { it[i] }) ?: continue
+                        if (best == null || Math.abs(f.r) > Math.abs(best.r)) { best = f; bestName = refs[i].name; signed = col == n + 1 }
+                    }
+                }
+                best?.let {
+                    if (Math.abs(it.r) >= 0.8) append(String.format(Locale.US, "  ≈ %s r=%.2f (%s×%.4g%+.4g)",
+                        bestName, it.r, if (signed) "s" else "u", it.a, it.b))
+                }
+                append('\n')
+            }
+        }
+
     fun bmwReport(): String = buildString {
+        if (watchReport.isNotEmpty()) append(watchReport).append('\n')
         append("Vitals BMW scan\n")
         for (h in bmwHits) append(h.line).append('\n')
     }
