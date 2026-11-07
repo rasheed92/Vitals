@@ -24,13 +24,15 @@ class ElmConnection private constructor(private val t: BleTransport) : Closeable
     val gattInfo: String get() = t.description
 
     companion object {
-        suspend fun open(ctx: Context, device: BluetoothDevice): ElmConnection {
+        suspend fun open(ctx: Context, device: BluetoothDevice, onStep: (String) -> Unit = {}): ElmConnection {
             val t = try {
-                BleTransport.connect(ctx, device)
+                BleTransport.connect(ctx, device, onStep)
+            } catch (e: BondFailed) {
+                throw e
             } catch (e: IOException) {
                 // GATT error 133 on the first attempt is common on Android; one retry clears most.
                 delay(800)
-                BleTransport.connect(ctx, device)
+                BleTransport.connect(ctx, device, onStep)
             }
             return ElmConnection(t)
         }

@@ -133,7 +133,7 @@ private fun DevicePicker(vm: ObdViewModel) {
     Column(Modifier.padding(16.dp)) {
         Text(
             "المحرك لازم يكون شغّال، وسكّر تطبيقات OBDLink و BimmerCode حتى ما تحجز الأداپتر. " +
-                "ما يحتاج تقرنه من إعدادات البلوتوث.",
+                "أول مرة راح يطلب اقتران (الرمز 123456)، وهذا يشتغل بس أول 5 دقايق بعد تركيب الأداپتر.",
             color = Muted, fontSize = 14.sp,
         )
         Spacer(Modifier.height(12.dp))

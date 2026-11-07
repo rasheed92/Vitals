@@ -108,7 +108,7 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 status = "جاري الاتصال…"
                 val dev = adapter?.getRemoteDevice(address) ?: error("البلوتوث مطفي")
-                val c = ElmConnection.open(getApplication(), dev)
+                val c = ElmConnection.open(getApplication(), dev) { status = it }
                 conn = c
                 addLog("GATT:\n" + c.gattInfo)
                 status = "تهيئة الأداپتر…"
