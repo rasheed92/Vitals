@@ -271,7 +271,7 @@ private fun BmwScanner(vm: ObdViewModel) {
                     if (f != null && t != null) vm.bmwScan(ecu, f, t)
                 }) { Text("ابدأ الفحص") }
                 Spacer(Modifier.width(6.dp))
-                Button(onClick = { vm.bmwWatch(ecu) }, enabled = vm.bmwHits.any { it.ecu == ecu }) { Text("مراقبة") }
+                Button(onClick = { vm.bmwWatch(ecu) }, enabled = vm.canWatch(ecu)) { Text("مراقبة") }
             }
             Spacer(Modifier.width(8.dp))
             TextButton(onClick = { clipboard.setText(AnnotatedString(vm.bmwReport())) }, enabled = vm.bmwHits.isNotEmpty()) {

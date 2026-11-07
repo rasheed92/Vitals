@@ -95,20 +95,60 @@ class ElmConnection private constructor(private val t: BleTransport) : Closeable
      * plain OBD mode so the live poller keeps working. [ecu]: 0x12 DME, 0x18 EGS.
      * Read-only use: the block only gets [read] for service 0x22.
      */
-    suspend fun <T> bmw(ecu: Int, block: suspend (read: suspend (did: Int) -> Uds) -> T): T = mutex.withLock {
+    /**
+     * Talks to one BMW ECU over UDS with BMW extended addressing (tester F1, request id 6F1,
+     * reply id 600+ecu), then puts the adapter back into plain OBD mode. [ecu]: 0x12 DME, 0x18 EGS.
+     * Read-only: [read] is service 0x22; [obd] briefly drops back to standard addressing to read
+     * mode-01 PIDs (the DME does not answer F4xx over BMW addressing) and returns to the ECU.
+     */
+    suspend fun <T> bmw(
+        ecu: Int,
+        block: suspend (read: suspend (did: Int) -> Uds, obd: suspend (pids: List<Int>) -> Map<Int, IntArray>) -> T,
+    ): T = mutex.withLock {
         val e = String.format(Locale.US, "%02X", ecu)
-        for (c in listOf("ATSH6F1", "ATCEA$e", "ATCRA6$e", "ATFCSH6F1", "ATFCSD${e}300000", "ATFCSM1")) raw(c, 1500)
+        val enter = listOf("ATSH6F1", "ATCEA$e", "ATCRA6$e", "ATFCSH6F1", "ATFCSD${e}300000", "ATFCSM1")
+        val leave = listOf("ATFCSM0", "ATCEA", "ATCRA", "ATSH7DF")
+        suspend fun run(cmds: List<String>) { for (c in cmds) try { raw(c, 1500) } catch (_: ElmTimeout) {} }
+        run(enter)
         try {
-            block read@{ did ->
-                val r = try {
-                    raw(String.format(Locale.US, "22%04X", did), 1200)
-                } catch (_: ElmTimeout) {
-                    return@read Uds.None
-                }
-                Uds.parse(r, did)
-            }
+            block(
+                read@{ did ->
+                    val r = try {
+                        raw(String.format(Locale.US, "22%04X", did), 1200)
+                    } catch (_: ElmTimeout) {
+                        return@read Uds.None
+                    }
+                    Uds.parse(r, did)
+                },
+                { pids ->
+                    val out = HashMap<Int, IntArray>()
+                    run(leave)
+                    try {
+                        for (p in pids) {
+                            val r = try { raw(String.format(Locale.US, "01%02X1", p), 1200) } catch (_: ElmTimeout) { continue }
+                            parse01(r, p)?.let { out[p] = it }
+                        }
+                    } finally {
+                        run(enter)
+                    }
+                    out
+                },
+            )
         } finally {
-            for (c in listOf("ATFCSM0", "ATCEA", "ATCRA", "ATSH7DF")) try { raw(c, 1500) } catch (_: ElmTimeout) {}
+            run(leave)
+        }
+    }
+
+    private fun parse01(resp: String, pid: Int): IntArray? {
+        val hex = String.format(Locale.US, "%02X", pid)
+        val line = resp.lines().map { it.replace(" ", "") }
+            .firstOrNull { it.startsWith("41$hex") } ?: return null
+        val data = line.substring(4)
+        if (data.isEmpty() || data.length % 2 != 0) return null
+        return try {
+            IntArray(data.length / 2) { data.substring(it * 2, it * 2 + 2).toInt(16) }
+        } catch (e: NumberFormatException) {
+            null
         }
     }
 
@@ -124,18 +164,9 @@ class ElmConnection private constructor(private val t: BleTransport) : Closeable
 
     /** Mode 01 request. Returns the data bytes after "41 xx", or null if unsupported/no reply. */
     suspend fun query(pid: Int): IntArray? {
-        val hex = String.format(Locale.US, "%02X", pid)
         // Trailing "1" = expect one response, so the adapter doesn't wait for more ECUs.
-        val resp = try { send("01${hex}1") } catch (e: ElmTimeout) { return null }
-        val line = resp.lines().map { it.replace(" ", "") }
-            .firstOrNull { it.startsWith("41$hex") } ?: return null
-        val data = line.substring(4)
-        if (data.isEmpty() || data.length % 2 != 0) return null
-        return try {
-            IntArray(data.length / 2) { data.substring(it * 2, it * 2 + 2).toInt(16) }
-        } catch (e: NumberFormatException) {
-            null
-        }
+        val resp = try { send(String.format(Locale.US, "01%02X1", pid)) } catch (e: ElmTimeout) { return null }
+        return parse01(resp, pid)
     }
 
     /** Walks PID 00, 20, 40… bitmasks and returns every supported mode-01 PID. */

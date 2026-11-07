@@ -210,7 +210,7 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
                 addLog("BMW scan ${ecuName(ecu)} ${hex4(from)}–${hex4(to)}")
                 while (did <= to && isActive) {
                     val end = minOf(did + 63, to)
-                    c.bmw(ecu) { read ->
+                    c.bmw(ecu) { read, _ ->
                         while (did <= end && isActive) {
                             when (val r = read(did)) {
                                 is Uds.Positive -> {
@@ -245,70 +245,96 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
     fun bmwStop() { bmwJob?.cancel() }
 
     // --- Watch: re-read short DIDs, see which move, and match them against standard OBD values ---
-    private class Ref(val name: String, val did: Int, val fast: Boolean, val decode: (IntArray) -> Double)
+    private class Ref(val name: String, val pid: Int, val fast: Boolean, val decode: (IntArray) -> Double)
 
-    // UDS F4xx = OBD mode-01 PID xx, readable over BMW addressing, so refs and DIDs share one session.
+    // Standard mode-01 PIDs, read between DID batches so each DID sample has fresh references.
     private val refs = listOf(
-        Ref("الدورات rpm", 0xF40C, true) { (it[0] * 256 + it[1]) / 4.0 },
-        Ref("ضغط المانيفولد kPa", 0xF40B, true) { it[0].toDouble() },
-        Ref("الثروتل %", 0xF411, true) { it[0] * 100 / 255.0 },
-        Ref("الحمل %", 0xF404, true) { it[0] * 100 / 255.0 },
-        Ref("حرارة الماي °C", 0xF405, false) { it[0] - 40.0 },
-        Ref("حرارة الزيت °C", 0xF45C, false) { it[0] - 40.0 },
-        Ref("حرارة السحب °C", 0xF40F, false) { it[0] - 40.0 },
+        Ref("الدورات rpm", 0x0C, true) { (it[0] * 256 + it[1]) / 4.0 },
+        Ref("ضغط المانيفولد kPa", 0x0B, true) { it[0].toDouble() },
+        Ref("الثروتل %", 0x11, true) { it[0] * 100 / 255.0 },
+        Ref("الحمل %", 0x04, true) { it[0] * 100 / 255.0 },
+        Ref("توقيت الإشعال °", 0x0E, true) { it[0] / 2.0 - 64 },
+        Ref("MAF g/s", 0x10, true) { (it[0] * 256 + it[1]) / 100.0 },
+        Ref("حرارة الماي °C", 0x05, false) { it[0] - 40.0 },
+        Ref("حرارة الزيت °C", 0x5C, false) { it[0] - 40.0 },
+        Ref("حرارة السحب °C", 0x0F, false) { it[0] - 40.0 },
     )
+
+    /** DME DIDs that moved during the first watch on this car (no fresh scan needed). */
+    private val knownDme: List<Int> = ("4007 4200 4202 4203 4205 4206 4300 4402 4403 4408 4409 4420 4421 4423 4425 4432 " +
+        "4436 4505 4506 4507 4520 4521 4522 4523 4524 4525 452A 452B 452C 452E 4536 4600 4601 4602 4603 4609 4617 " +
+        "4650 4651 4653 4654 4659 472C 472E 4807 480B 480C 480D 4810 4812 4A05 4A08 4A09 4A0C 4A13 4A21 4A24 4A25 " +
+        "4A29 4A2B 4A2D 4A30 4A31 4A32 4A33 4A37 4A38 4A39 4A3A 4A49 4A4A 4A4B 4A4C 4A4D 4A58 4A59 4A7A 4A7B 4A81 " +
+        "4A94 4AAA 4AAB 4AB6 4AB7 4AB8 4ABC 4B24 4B25 4B50 4B51 4B52 4B53 4B58 4B59 4B5A 4B5B 4BCB")
+        .split(" ").map { it.toInt(16) }
+
+    fun canWatch(ecu: Int) = ecu == 0x12 || bmwHits.any { it.ecu == ecu }
 
     var watchReport by mutableStateOf(""); private set
 
-    fun bmwWatch(ecu: Int, rounds: Int = 10) {
+    fun bmwWatch(ecu: Int, rounds: Int = 14) {
         val c = conn ?: return
         if (bmwRunning) return
-        val cands = bmwHits.filter { it.ecu == ecu && it.data.size in 1..4 }.map { it.did }.distinct()
+        val scanned = bmwHits.filter { it.ecu == ecu && it.data.size in 1..4 }.map { it.did }.distinct()
+        val cands = scanned.ifEmpty { if (ecu == 0x12) knownDme else emptyList() }
         if (cands.isEmpty()) { bmwProgress = "سوّي فحص ${ecuName(ecu)} أول"; return }
         bmwRunning = true
         watchReport = ""
         bmwJob = viewModelScope.launch {
             val n = refs.size
-            val refVal = DoubleArray(n) { Double.NaN }
+            var last = DoubleArray(n) { Double.NaN }
             val refOk = BooleanArray(n)
+            val refMin = DoubleArray(n) { Double.MAX_VALUE }
+            val refMax = DoubleArray(n) { -Double.MAX_VALUE }
             val samples = HashMap<Int, MutableList<DoubleArray>>()
             val first = HashMap<Int, Long>()
             val changed = LinkedHashSet<Int>()
             try {
                 for (round in 0 until rounds) {
                     if (!isActive) break
-                    val list = if (round < 2) cands else cands.filter { it in changed }
+                    val full = if (scanned.isNotEmpty()) 2 else 1 // a fresh scan list still has constants to weed out
+                    val list = if (round < full) cands else cands.filter { it in changed }
                     if (list.isEmpty()) break
-                    c.bmw(ecu) { read ->
-                        suspend fun readRefs(fastOnly: Boolean) {
-                            for ((i, r) in refs.withIndex()) {
-                                if (fastOnly && !r.fast) continue
-                                if (round > 0 && !refOk[i]) continue
-                                val res = read(r.did)
-                                if (res is Uds.Positive) {
-                                    try { refVal[i] = r.decode(res.data); refOk[i] = true } catch (_: Exception) {}
-                                }
+                    c.bmw(ecu) { read, obd ->
+                        suspend fun readRefs(fastOnly: Boolean): DoubleArray {
+                            val want = refs.withIndex().filter { (i, r) -> (!fastOnly || r.fast) && (round == 0 || refOk[i]) }
+                            val got = obd(want.map { it.value.pid })
+                            val out = last.copyOf()
+                            for ((i, r) in want) {
+                                val d = got[r.pid] ?: continue
+                                try {
+                                    out[i] = r.decode(d); refOk[i] = true
+                                    refMin[i] = minOf(refMin[i], out[i]); refMax[i] = maxOf(refMax[i], out[i])
+                                } catch (_: Exception) {}
                             }
+                            last = out
+                            return out
                         }
-                        readRefs(false)
-                        for ((k, did) in list.withIndex()) {
+                        var before = readRefs(false)
+                        for (chunk in list.chunked(8)) {
                             if (!currentCoroutineContext().isActive) break
-                            if (k > 0 && k % 12 == 0) readRefs(true)
-                            val d = (read(did) as? Uds.Positive)?.data ?: continue
-                            if (d.isEmpty()) continue
-                            var u = 0L
-                            for (b in d) u = (u shl 8) or b.toLong()
-                            val bits = d.size * 8
-                            val sg = if (u >= (1L shl (bits - 1))) u - (1L shl bits) else u
-                            if (u != first.getOrPut(did) { u }) changed.add(did)
-                            samples.getOrPut(did) { mutableListOf() }
-                                .add(refVal.copyOf() + doubleArrayOf(u.toDouble(), sg.toDouble()))
-                            if (k % 8 == 0) bmwProgress =
-                                "مراقبة ${ecuName(ecu)}: جولة ${round + 1}/$rounds · ${list.size} قيمة · تتغير ${changed.size}"
+                            val vals = chunk.map { did -> did to (read(did) as? Uds.Positive)?.data }
+                            val after = readRefs(true)
+                            val mid = DoubleArray(n) { i ->
+                                val a = before[i]; val b = after[i]
+                                if (a.isNaN()) b else if (b.isNaN()) a else (a + b) / 2
+                            }
+                            for ((did, d) in vals) {
+                                if (d == null || d.isEmpty()) continue
+                                var u = 0L
+                                for (x in d) u = (u shl 8) or x.toLong()
+                                val bits = d.size * 8
+                                val sg = if (u >= (1L shl (bits - 1))) u - (1L shl bits) else u
+                                if (u != first.getOrPut(did) { u }) changed.add(did)
+                                samples.getOrPut(did) { mutableListOf() }.add(mid + doubleArrayOf(u.toDouble(), sg.toDouble()))
+                            }
+                            before = after
+                            bmwProgress = "مراقبة ${ecuName(ecu)}: جولة ${round + 1}/$rounds · ${list.size} قيمة · " +
+                                "تتغير ${changed.size} · مراجع ${refOk.count { it }}/$n"
                         }
                     }
                 }
-                watchReport = watchText(ecu, samples, changed, refOk)
+                watchReport = watchText(ecu, samples, changed, refOk, refMin, refMax)
                 addLog(watchReport)
                 bmwProgress = "خلصت المراقبة · ${changed.size} قيمة تتغير"
             } catch (e: IOException) {
@@ -338,11 +364,18 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
         return Fit(sxy / Math.sqrt(sxx * syy), a, my - a * mx)
     }
 
-    private fun watchText(ecu: Int, samples: Map<Int, List<DoubleArray>>, changed: Set<Int>, refOk: BooleanArray): String =
+    private fun watchText(
+        ecu: Int, samples: Map<Int, List<DoubleArray>>, changed: Set<Int>, refOk: BooleanArray,
+        refMin: DoubleArray, refMax: DoubleArray,
+    ): String =
         buildString {
             val n = refs.size
             append("Vitals BMW watch ${ecuName(ecu)}\n")
-            append("refs: ").append(refs.filterIndexed { i, _ -> refOk[i] }.joinToString(", ") { it.name }.ifEmpty { "ماكو" }).append('\n')
+            append("refs: ").append(
+                refs.withIndex().filter { refOk[it.index] }.joinToString(", ") { (i, r) ->
+                    String.format(Locale.US, "%s %.0f–%.0f", r.name, refMin[i], refMax[i])
+                }.ifEmpty { "ماكو" },
+            ).append('\n')
             for (did in changed.sorted()) {
                 val ss = samples[did] ?: continue
                 val raw = ss.map { it[n] }
