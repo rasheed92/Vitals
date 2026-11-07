@@ -292,7 +292,7 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 for (round in 0 until rounds) {
                     if (!isActive) break
-                    val full = if (scanned.isNotEmpty()) 2 else 1 // a fresh scan list still has constants to weed out
+                    val full = 3 // read every candidate a few times before keeping only the ones that move
                     val list = if (round < full) cands else cands.filter { it in changed }
                     if (list.isEmpty()) break
                     c.bmw(ecu) { read, obd ->
