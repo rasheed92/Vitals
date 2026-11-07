@@ -290,6 +290,7 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
         Ref("الحمل %", 0x04, true) { it[0] * 100 / 255.0 },
         Ref("توقيت الإشعال °", 0x0E, true) { it[0] / 2.0 - 64 },
         Ref("MAF g/s", 0x10, true) { (it[0] * 256 + it[1]) / 100.0 },
+        Ref("ضغط الرايل bar", 0x23, true) { (it[0] * 256 + it[1]) / 10.0 },
         Ref("حرارة الماي °C", 0x05, false) { it[0] - 40.0 },
         Ref("حرارة الزيت °C", 0x5C, false) { it[0] - 40.0 },
         Ref("حرارة السحب °C", 0x0F, false) { it[0] - 40.0 },
