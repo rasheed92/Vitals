@@ -71,7 +71,7 @@ class FuelTracker(ctx: Context) {
     /** Previous tank with a score, for the comparison line. */
     val previous: Tank? get() = tanks.dropLast(1).lastOrNull { it.score != null }
 
-    fun setPrice(iqd: Int) {
+    fun updatePrice(iqd: Int) {
         price = iqd.coerceAtLeast(0)
         prefs.edit().putInt("price", price).apply()
     }

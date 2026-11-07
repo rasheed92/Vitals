@@ -273,7 +273,7 @@ private fun FuelScreen(f: FuelTracker) {
     ) {
         OutlinedTextField(
             value = priceText,
-            onValueChange = { t -> priceText = t.filter { it.isDigit() }.take(6); f.setPrice(priceText.toIntOrNull() ?: 0) },
+            onValueChange = { t -> priceText = t.filter { it.isDigit() }.take(6); f.updatePrice(priceText.toIntOrNull() ?: 0) },
             singleLine = true, modifier = Modifier.fillMaxWidth(),
             label = { Text("سعر لتر البانزين (دينار)") },
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
