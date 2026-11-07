@@ -6,6 +6,7 @@ import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
+import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothProfile
 import android.bluetooth.BluetoothStatusCodes
 import android.content.Context
@@ -20,8 +21,13 @@ import java.util.concurrent.TimeUnit
 
 /**
  * Byte pipe to a BLE OBD adapter (OBDLink CX and other BLE ELM327/STN devices).
- * The UART-like service is found at runtime: the first non-standard service that has
- * both a notify/indicate characteristic and a write characteristic.
+ *
+ * Fix for "فشل الإرسال (status 13)" = GATT_INVALID_ATTRIBUTE_LENGTH:
+ *  1. Writes are always split into 20-byte chunks. Some adapters accept a large MTU
+ *     but reject characteristic writes longer than 20 bytes.
+ *  2. The data service is chosen from known BLE-UART services first (FFF0, FFE0,
+ *     Nordic UART), and only then falls back to "first non-standard service".
+ *     This avoids picking a config/firmware-update service that rejects our writes.
  */
 @SuppressLint("MissingPermission")
 class BleTransport private constructor() : BluetoothGattCallback(), Closeable {
@@ -38,11 +44,24 @@ class BleTransport private constructor() : BluetoothGattCallback(), Closeable {
     /** Human-readable GATT layout, written to the console log for debugging. */
     var description = ""; private set
 
+    /** Which service/characteristics were picked, for the console log. */
+    var picked = ""; private set
+
     companion object {
         private val CCCD: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
         private const val BASE_SUFFIX = "-0000-1000-8000-00805f9b34fb"
         // GAP, GATT, Device Information, Battery
         private val STANDARD = setOf(0x1800, 0x1801, 0x180A, 0x180F)
+
+        /** Known BLE serial (UART) services, in order of preference. */
+        private val PREFERRED: List<UUID> = listOf(
+            UUID.fromString("0000fff0-0000-1000-8000-00805f9b34fb"),
+            UUID.fromString("0000ffe0-0000-1000-8000-00805f9b34fb"),
+            UUID.fromString("6e400001-b5a3-f393-e0a9-e50e24dcca9e"), // Nordic UART
+        )
+
+        /** Max bytes per write. 20 = what every BLE device accepts with the default MTU. */
+        private const val CHUNK = 20
 
         suspend fun connect(ctx: Context, device: BluetoothDevice): BleTransport {
             val t = BleTransport()
@@ -74,8 +93,27 @@ class BleTransport private constructor() : BluetoothGattCallback(), Closeable {
         pickCharacteristics(g)
         enableNotifications(g, notifyChar!!)
 
-        // Bigger MTU = fewer notification packets per reply. Best effort.
+        // Bigger MTU = fewer notification packets per reply. Best effort; writes stay at 20 bytes.
         try { op(3_000) { g.requestMtu(247) } } catch (_: IOException) {}
+    }
+
+    private fun isNotify(c: BluetoothGattCharacteristic) =
+        c.properties and (BluetoothGattCharacteristic.PROPERTY_NOTIFY or BluetoothGattCharacteristic.PROPERTY_INDICATE) != 0
+
+    private fun isWrite(c: BluetoothGattCharacteristic) =
+        c.properties and (BluetoothGattCharacteristic.PROPERTY_WRITE or BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
+
+    /** Returns true if the service has a usable notify + write pair and selects it. */
+    private fun tryService(s: BluetoothGattService): Boolean {
+        val n = s.characteristics.firstOrNull { isNotify(it) } ?: return false
+        // Prefer a separate write characteristic (e.g. FFF2 next to notify FFF1); else a combined one.
+        val w = s.characteristics.firstOrNull { isWrite(it) && it.uuid != n.uuid }
+            ?: s.characteristics.firstOrNull { isWrite(it) }
+            ?: return false
+        notifyChar = n
+        writeChar = w
+        picked = "svc ${s.uuid}\n  notify ${n.uuid}\n  write  ${w.uuid}"
+        return true
     }
 
     private fun pickCharacteristics(g: BluetoothGatt) {
@@ -88,21 +126,17 @@ class BleTransport private constructor() : BluetoothGattCallback(), Closeable {
         }
         description = sb.toString().trimEnd()
 
+        // 1) Known UART services first.
+        for (id in PREFERRED) {
+            val s = g.getService(id) ?: continue
+            if (tryService(s)) return
+        }
+        // 2) Fallback: first non-standard service with notify + write.
         for (s in g.services) {
             if (shortId(s.uuid) in STANDARD) continue
-            val n = s.characteristics.firstOrNull {
-                it.properties and (BluetoothGattCharacteristic.PROPERTY_NOTIFY or BluetoothGattCharacteristic.PROPERTY_INDICATE) != 0
-            }
-            val w = s.characteristics.firstOrNull {
-                it.properties and (BluetoothGattCharacteristic.PROPERTY_WRITE or BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
-            }
-            if (n != null && w != null) {
-                notifyChar = n
-                writeChar = w
-                return
-            }
+            if (tryService(s)) return
         }
-        throw IOException("ما لكيت خدمة البيانات بالأداپتر. هل هو أداپتر OBD؟")
+        throw IOException("ما لكيت خدمة البيانات بالأداپتر. هل هو أداپتر OBD؟\n$description")
     }
 
     @Suppress("DEPRECATION")
@@ -140,16 +174,17 @@ class BleTransport private constructor() : BluetoothGattCallback(), Closeable {
         val noResp = c.properties and BluetoothGattCharacteristic.PROPERTY_WRITE == 0
         val type = if (noResp) BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
         else BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-        val size = (mtu - 3).coerceAtLeast(20)
         var i = 0
         while (i < bytes.size) {
-            val part = bytes.copyOfRange(i, minOf(i + size, bytes.size))
+            val part = bytes.copyOfRange(i, minOf(i + CHUNK, bytes.size))
             val st = op {
                 if (Build.VERSION.SDK_INT >= 33) g.writeCharacteristic(c, part, type) == BluetoothStatusCodes.SUCCESS
                 else { c.writeType = type; c.value = part; g.writeCharacteristic(c) }
             }
-            if (st != BluetoothGatt.GATT_SUCCESS) throw IOException("فشل الإرسال (status $st)")
-            i += size
+            if (st != BluetoothGatt.GATT_SUCCESS) {
+                throw IOException("فشل الإرسال (status $st, ${part.size}B)\n$picked\n\n$description")
+            }
+            i += CHUNK
         }
     }
 
