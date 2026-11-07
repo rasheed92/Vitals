@@ -85,12 +85,32 @@ object Pids {
         BmwPid(0x18, 0x4431, d(0x2024, "الگير 4431 (اختبار)", "", 0, true), test = true) { it },
     )
 
+    /** Derived: spread between the four cylinders' ignition timing under part load (EMA, °). */
+    const val KNOCK = 0x2040
+    /** Derived: this trip's fuel cost in IQD, or -1 when no price is set. */
+    const val TRIP_COST = 0x2050
+
+    private val knock = PidDef(KNOCK, "علامة الـ Knock (اختبار)", "", 0, 1, true, text = { v ->
+        when {
+            v < 0 -> "يحتاج دوس"
+            v < 1.5 -> String.format(java.util.Locale.US, "زين · %.1f°", v)
+            v < 3.0 -> String.format(java.util.Locale.US, "تحت المراقبة · %.1f°", v)
+            else -> String.format(java.util.Locale.US, "بانزين ضعيف؟ · %.1f°", v)
+        }
+    }) { 0.0 }
+
+    private val tripCost = PidDef(TRIP_COST, "كلفة هالمشوار", "دينار", 0, 0, true, text = { v ->
+        if (v < 0) "حط سعر اللتر" else String.format(java.util.Locale.US, "%,d", Math.round(v / 250.0) * 250)
+    }) { 0.0 }
+
+    fun knockVerdictLevel(v: Double) = if (v < 0) -1 else if (v < 1.5) 0 else if (v < 3.0) 1 else 2
+
     /** Misfire count this driving cycle, cylinder n at key MISFIRE + n (Mode 06 MID A1+n). */
     const val MISFIRE = 0x2030
     private val misfire = (1..4).associate { n ->
         (MISFIRE + n) to PidDef(MISFIRE + n, "Misfire سلندر $n", "هالمشوار", 0, 0, false) { 0.0 }
     }
 
-    fun def(key: Int): PidDef = misfire[key] ?: if (key == BOOST) boost else
+    fun def(key: Int): PidDef = misfire[key] ?: if (key == KNOCK) knock else if (key == TRIP_COST) tripCost else if (key == BOOST) boost else
         bmw.firstOrNull { it.def.pid == key }?.def ?: all.first { it.pid == key }
 }

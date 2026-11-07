@@ -28,6 +28,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -62,16 +63,22 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.compose.ui.platform.LocalContext
 import java.util.Locale
 import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.lazy.items as listItems
 
-private val Bg = Color(0xFF0A0C10)
-private val CardBg = Color(0xFF14181F)
-private val Muted = Color(0xFF8B93A1)
-private val Accent = Color(0xFF3B82F6)
-private val Warn = Color(0xFFE5484D)
+// Design tokens (Vitals G30 design): carbon-black ground, M-stripe state colours.
+private val Bg = Color(0xFF0E1322)
+private val CardBg = Color(0xFF151C2E)
+private val Muted = Color(0xFF8B95AD)
+private val Accent = Color(0xFF3B63E0)   // M blue: normal
+private val Cold = Color(0xFF4FB3FF)     // M light blue: cold / below target
+private val Warn = Color(0xFFE8352B)     // M red: hot / redline
+private val Track = Color(0xFF1C2440)
+private val ColdDim = Color(0xFF1D3550)
+private val NormDim = Color(0xFF1E2A55)
+private val HotDim = Color(0xFF3A1E2A)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -89,12 +96,13 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun App(vm: ObdViewModel = viewModel()) {
+fun App(vm: ObdViewModel = ObdViewModel.get(LocalContext.current)) {
     var granted by remember { mutableStateOf(vm.hasBtPermission()) }
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { res ->
         granted = res.values.all { it }
-        if (granted) vm.startScan()
+        if (granted) { vm.startScan(); vm.ensureAutoConnect() }
     }
+    LaunchedEffect(granted) { if (granted) vm.ensureAutoConnect() }
     var tab by remember { mutableIntStateOf(0) }
 
     Scaffold(containerColor = Bg, topBar = { Header(vm) }) { pad ->
@@ -164,7 +172,7 @@ private fun DevicePicker(vm: ObdViewModel) {
                 val isObd = d.name.contains("OBD", ignoreCase = true)
                 Row(
                     Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(CardBg)
-                        .clickable(enabled = !vm.busy) { vm.connect(d.address) }.padding(16.dp),
+                        .clickable(enabled = !vm.busy) { vm.connectManually(d.address, d.name) }.padding(16.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
@@ -180,13 +188,152 @@ private fun DevicePicker(vm: ObdViewModel) {
 
 @Composable
 private fun Dashboard(vm: ObdViewModel) {
+    // Shown in the hero / temperature rails, so not repeated as cards.
+    val inHero = setOf(0x0C, 0x0D, Pids.BOOST, Pids.BMW_BOOST, 0x2020, 0x2002, 0x2003, 0x2004, 0x05, 0x5C, 0x0F, Pids.TRIP_COST, Pids.KNOCK)
     LazyVerticalGrid(
         columns = GridCells.Adaptive(160.dp),
         contentPadding = PaddingValues(12.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        gridItems(vm.visibleKeys()) { key -> GaugeCard(Pids.def(key), vm.values[key]) }
+        item(span = { GridItemSpan(maxLineSpan) }) { Hero(vm) }
+        item(span = { GridItemSpan(maxLineSpan) }) { TempRails(vm) }
+        gridItems(vm.visibleKeys().filter { it !in inHero }) { key -> GaugeCard(Pids.def(key), vm.values[key]) }
+    }
+}
+
+/** Gear, rpm strip and boost: the one block meant to be read at a glance. */
+@Composable
+private fun Hero(vm: ObdViewModel) {
+    val v = vm.values
+    val rpm = v[0x0C]?.value
+    val speed = v[0x0D]?.value
+    val gear = v[0x2020]?.let { Pids.def(0x2020).text?.invoke(it.value) } ?: "—"
+    val boost = v[Pids.BMW_BOOST] ?: v[Pids.BOOST]
+    val cost = v[Pids.TRIP_COST]
+    val knock = v[Pids.KNOCK]
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(CardBg).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        RpmStrip(rpm ?: 0.0, Modifier.fillMaxWidth().height(12.dp))
+        Row(verticalAlignment = Alignment.Bottom) {
+            Text(gear, color = Color.White, fontSize = 56.sp, fontWeight = FontWeight.Bold, lineHeight = 56.sp)
+            Spacer(Modifier.weight(1f))
+            Column(horizontalAlignment = Alignment.End) {
+                Text("${rpm?.let { (it / 10).toInt() * 10 } ?: "—"} rpm", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+                Text("${speed?.toInt() ?: "—"} km/h", color = Muted, fontSize = 16.sp)
+            }
+        }
+        Row(verticalAlignment = Alignment.Bottom) {
+            Text("البوست", color = Muted, fontSize = 14.sp)
+            Spacer(Modifier.weight(1f))
+            Text(boost?.let { fmt(it.value, 2) } ?: "—", color = Color.White, fontSize = 60.sp, fontWeight = FontWeight.SemiBold, lineHeight = 60.sp)
+            Text(" bar", color = Muted, fontSize = 16.sp, modifier = Modifier.padding(bottom = 8.dp))
+        }
+        BoostBar(boost?.value ?: 0.0, boost?.max ?: 0.0, Modifier.fillMaxWidth().height(12.dp))
+        Text(
+            "أعلى قراءة ${boost?.let { fmt(it.max, 2) } ?: "—"} bar",
+            color = Muted, fontSize = 12.sp,
+        )
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            MiniStat("كلفة هالمشوار", cost?.let { Pids.def(Pids.TRIP_COST).text?.invoke(it.value) } ?: "—", if ((cost?.value ?: 0.0) >= 0) "دينار" else "بتبويب البانزين", Modifier.weight(1f))
+            val kl = knock?.let { Pids.knockVerdictLevel(it.value) } ?: -1
+            MiniStat(
+                "علامة الـ Knock", knock?.let { Pids.def(Pids.KNOCK).text?.invoke(it.value) } ?: "يحتاج دوس", "اختبار",
+                Modifier.weight(1f), if (kl == 2) Warn else Color.White,
+            )
+        }
+    }
+}
+
+@Composable
+private fun MiniStat(label: String, value: String, sub: String, modifier: Modifier, valueColor: Color = Color.White) {
+    Column(modifier.clip(RoundedCornerShape(12.dp)).background(Bg).padding(10.dp)) {
+        Text(label, color = Muted, fontSize = 12.sp)
+        Text(value, color = valueColor, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+        Text(sub, color = Muted, fontSize = 11.sp)
+    }
+}
+
+/** 20 segments, M colours by zone; the whole strip turns red from 6200 rpm (shift point). */
+@Composable
+private fun RpmStrip(rpm: Double, modifier: Modifier) {
+    Canvas(modifier) {
+        val n = 20
+        val gap = 3.dp.toPx()
+        val w = (size.width - gap * (n - 1)) / n
+        val lit = (rpm.coerceIn(0.0, 7000.0) / 7000.0 * n).toInt()
+        val shift = rpm >= 6200
+        for (i in 0 until n) {
+            val zone = if (i < 12) 0 else if (i < 17) 1 else 2
+            val c = when {
+                shift -> Warn
+                i < lit -> listOf(Cold, Accent, Warn)[zone]
+                else -> listOf(ColdDim, NormDim, HotDim)[zone]
+            }
+            // Strip always reads left to right, like the tachometer.
+            drawRoundRect(c, topLeft = androidx.compose.ui.geometry.Offset(i * (w + gap), 0f),
+                size = androidx.compose.ui.geometry.Size(w, size.height),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(2.dp.toPx()))
+        }
+    }
+}
+
+@Composable
+private fun BoostBar(value: Double, peak: Double, modifier: Modifier) {
+    val max = 1.5
+    Canvas(modifier) {
+        val r = androidx.compose.ui.geometry.CornerRadius(3.dp.toPx())
+        drawRoundRect(Track, cornerRadius = r)
+        val f = (value.coerceIn(0.0, max) / max).toFloat()
+        drawRoundRect(Accent, size = androidx.compose.ui.geometry.Size(size.width * f, size.height), cornerRadius = r)
+        val p = (peak.coerceIn(0.0, max) / max).toFloat() * size.width
+        drawRect(Color.White, topLeft = androidx.compose.ui.geometry.Offset(p - 1.5.dp.toPx(), -4.dp.toPx()),
+            size = androidx.compose.ui.geometry.Size(3.dp.toPx(), size.height + 8.dp.toPx()))
+    }
+}
+
+/** Temperatures on M-stripe rails: cold / normal / hot zones with a marker. */
+@Composable
+private fun TempRails(vm: ObdViewModel) {
+    val v = vm.values
+    data class T(val label: String, val value: Double?, val lo: Double, val a: Double, val c: Double, val hi: Double)
+    val rows = listOf(
+        T("حرارة الماي", (v[0x2002] ?: v[0x05])?.value, 40.0, 80.0, 115.0, 130.0),
+        T("حرارة الزيت", (v[0x2003] ?: v[0x5C])?.value, 40.0, 90.0, 125.0, 150.0),
+        T("هواء السحب", (v[0x2004] ?: v[0x0F])?.value, -10.0, 0.0, 45.0, 80.0),
+    )
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(CardBg).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        for (t in rows) {
+            val z = when { t.value == null -> 1; t.value < t.a -> 0; t.value <= t.c -> 1; else -> 2 }
+            Row(verticalAlignment = Alignment.Bottom) {
+                Text(t.label, color = Color(0xFFC4CBDA), fontSize = 14.sp)
+                Text(" · " + listOf("بارد", "طبيعي", "حار")[z], color = Muted, fontSize = 12.sp)
+                Spacer(Modifier.weight(1f))
+                Text(t.value?.let { fmt(it, 0) } ?: "—", color = if (z == 2) Warn else Color.White, fontSize = 24.sp, fontWeight = FontWeight.SemiBold)
+                Text(" °C", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(bottom = 3.dp))
+            }
+            Canvas(Modifier.fillMaxWidth().height(6.dp)) {
+                val gap = 3.dp.toPx()
+                val span = t.hi - t.lo
+                val w1 = ((t.a - t.lo) / span).toFloat() * (size.width - 2 * gap)
+                val w2 = ((t.c - t.a) / span).toFloat() * (size.width - 2 * gap)
+                val w3 = size.width - 2 * gap - w1 - w2
+                val r = androidx.compose.ui.geometry.CornerRadius(2.dp.toPx())
+                drawRoundRect(if (z == 0) Cold else ColdDim, size = androidx.compose.ui.geometry.Size(w1, size.height), cornerRadius = r)
+                drawRoundRect(if (z == 1) Accent else NormDim, topLeft = androidx.compose.ui.geometry.Offset(w1 + gap, 0f), size = androidx.compose.ui.geometry.Size(w2, size.height), cornerRadius = r)
+                drawRoundRect(if (z == 2) Warn else HotDim, topLeft = androidx.compose.ui.geometry.Offset(w1 + w2 + 2 * gap, 0f), size = androidx.compose.ui.geometry.Size(w3, size.height), cornerRadius = r)
+                t.value?.let {
+                    val x = ((it - t.lo) / span).coerceIn(0.0, 1.0).toFloat() * size.width
+                    drawRect(Color.White, topLeft = androidx.compose.ui.geometry.Offset(x - 1.dp.toPx(), -5.dp.toPx()),
+                        size = androidx.compose.ui.geometry.Size(2.dp.toPx(), size.height + 10.dp.toPx()))
+                }
+            }
+        }
     }
 }
 

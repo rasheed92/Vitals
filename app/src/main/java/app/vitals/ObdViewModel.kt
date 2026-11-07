@@ -15,9 +15,11 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.lifecycle.AndroidViewModel
-import androidx.lifecycle.viewModelScope
+import android.content.Context
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -25,7 +27,22 @@ import kotlinx.coroutines.launch
 import java.io.IOException
 import java.util.Locale
 
-class ObdViewModel(app: Application) : AndroidViewModel(app) {
+/**
+ * Process-wide engine: one BLE link and one set of live values shared by the phone UI and
+ * the Android Auto screen. Lives as long as the app process, not a single screen.
+ */
+class ObdViewModel private constructor(private val app: Application) {
+    companion object {
+        @Volatile private var instance: ObdViewModel? = null
+        fun get(ctx: Context): ObdViewModel =
+            instance ?: synchronized(this) {
+                instance ?: ObdViewModel(ctx.applicationContext as Application).also { instance = it }
+            }
+    }
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val prefs = app.getSharedPreferences("conn", Context.MODE_PRIVATE)
+
     var connected by mutableStateOf(false); private set
     var busy by mutableStateOf(false); private set
     var status by mutableStateOf("غير متصل"); private set
@@ -39,7 +56,7 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
     private var pollJob: Job? = null
 
     private val adapter: BluetoothAdapter?
-        get() = getApplication<Application>().getSystemService(BluetoothManager::class.java)?.adapter
+        get() = app.getSystemService(BluetoothManager::class.java)?.adapter
 
     // --- BLE scan ---
     data class Found(val name: String, val address: String, val rssi: Int)
@@ -64,7 +81,7 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun hasBtPermission(): Boolean = requiredPermissions().all {
-        getApplication<Application>().checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED
+        app.checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED
     }
 
     /** OBDLink first, then strongest signal. */
@@ -82,7 +99,7 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
         scanning = true
         status = "يدوّر على الأداپتر…"
         s.startScan(null, ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build(), scanCb)
-        scanTimer = viewModelScope.launch {
+        scanTimer = scope.launch {
             delay(12_000)
             stopScan()
             if (!connected && !busy) status = if (found.isEmpty()) "ما لكيت شي، تأكد المحرك شغّال" else "اختار الأداپتر"
@@ -100,10 +117,28 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
 
     fun visibleKeys(): List<Int> = Pids.displayOrder.filter {
         if (it == Pids.BOOST) 0x0B in supported else it in supported
-    } + (1..4).map { Pids.MISFIRE + it }.filter { it in values } +
+    } + listOf(Pids.TRIP_COST, Pids.KNOCK).filter { it in values } +
+        (1..4).map { Pids.MISFIRE + it }.filter { it in values } +
         Pids.bmw.map { it.def.pid }.filter { it in values }
 
     private var lastMisfire = 0L
+    private var knockEma = -1.0
+    private var knockSeen = 0L
+
+    /** Fuel quality hint: under part load, a cylinder pulling timing alone means knock. */
+    private fun updateKnock() {
+        val rpm = values[0x0C]?.value ?: return
+        val load = values[0x04]?.value ?: return
+        val cyl = (0x2011..0x2014).mapNotNull { values[it]?.value }
+        if (cyl.size < 4) { if (Pids.KNOCK !in values) put(Pids.KNOCK, -1.0); return }
+        if (rpm !in 1200.0..4500.0 || load !in 35.0..95.0) { if (Pids.KNOCK !in values) put(Pids.KNOCK, -1.0); return }
+        val now = System.currentTimeMillis()
+        if (now - knockSeen < 1400) return // one sample per DME poll
+        knockSeen = now
+        val spread = cyl.max() - cyl.min()
+        knockEma = if (knockEma < 0) spread else knockEma * 0.85 + spread * 0.15
+        put(Pids.KNOCK, knockEma)
+    }
 
     private var lastDme = 0L
     private var lastEgs = 0L
@@ -130,11 +165,11 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
         if (busy) return
         busy = true
         stopScan()
-        viewModelScope.launch {
+        scope.launch {
             try {
                 status = "جاري الاتصال…"
                 val dev = adapter?.getRemoteDevice(address) ?: error("البلوتوث مطفي")
-                val c = ElmConnection.open(getApplication(), dev) { status = it }
+                val c = ElmConnection.open(app, dev) { status = it }
                 conn = c
                 addLog("GATT:\n" + c.gattInfo)
                 status = "تهيئة الأداپتر…"
@@ -145,6 +180,7 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
                 val volt = try { c.send("ATRV") } catch (e: Exception) { "" }
                 status = "متصل · $volt"
                 connected = true
+                prefs.edit().putString("address", address).apply()
                 startPolling(c)
             } catch (e: Exception) {
                 status = "فشل الاتصال: ${e.message}"
@@ -160,7 +196,7 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
     private fun startPolling(c: ElmConnection) {
         pollJob?.cancel()
         val active = Pids.all.filter { it.pid in supported }
-        pollJob = viewModelScope.launch {
+        pollJob = scope.launch {
             var tick = 0
             while (isActive) {
                 if (bmwRunning) { delay(200); continue } // scanner owns the link
@@ -187,6 +223,8 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
                     )
                 }
                 lastFuelTick = now
+                put(Pids.TRIP_COST, if (fuel.price > 0) fuel.tripCost() else -1.0)
+                updateKnock()
                 try {
                     if (now - lastDme > 1500) { lastDme = now; pollBmw(c, 0x12) }
                     if (now - lastEgs > 4000) { lastEgs = now; pollBmw(c, 0x18) }
@@ -218,7 +256,7 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
         val c = conn ?: return
         val t = cmd.trim().uppercase(Locale.US)
         if (t.isEmpty()) return
-        viewModelScope.launch {
+        scope.launch {
             addLog("> $t")
             try {
                 addLog(c.send(t, 4000).ifEmpty { "(فارغ)" })
@@ -247,7 +285,7 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
         val c = conn ?: return
         if (bmwRunning || from > to) return
         bmwRunning = true
-        bmwJob = viewModelScope.launch {
+        bmwJob = scope.launch {
             var did = from
             var neg = 0
             var silent = 0
@@ -326,7 +364,7 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
         if (cands.isEmpty()) { bmwProgress = "سوّي فحص ${ecuName(ecu)} أول"; return }
         bmwRunning = true
         watchReport = ""
-        bmwJob = viewModelScope.launch {
+        bmwJob = scope.launch {
             val n = refs.size
             var last = DoubleArray(n) { Double.NaN }
             val refOk = BooleanArray(n)
@@ -451,11 +489,13 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun lost(e: Exception) {
         addLog("ERROR ${e.message}")
-        disconnect()
-        status = "انقطع الاتصال"
+        disconnect(user = false)
+        status = "انقطع الاتصال، يرجع يتصل تلقائياً"
     }
 
-    fun disconnect() {
+    /** [user] = the driver pressed Disconnect: stop auto-reconnect until they pick a device. */
+    fun disconnect(user: Boolean = true) {
+        if (user) userStopped = true
         fuel.save()
         lastFuelTick = 0L
         bmwJob?.cancel()
@@ -473,9 +513,34 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
         while (log.size > 400) log.removeAt(0)
     }
 
-    override fun onCleared() {
-        stopScan()
-        disconnect()
+    // --- auto-connect to the last adapter ---
+    val savedAddress: String? get() = prefs.getString("address", null)
+    val savedName: String? get() = prefs.getString("name", null)
+    private var userStopped = false
+    private var autoJob: Job? = null
+
+    /** Keep trying the saved adapter while nothing is connected. Safe to call repeatedly. */
+    fun ensureAutoConnect() {
+        if (autoJob?.isActive == true) return
+        autoJob = scope.launch {
+            while (isActive) {
+                val addr = savedAddress
+                if (addr != null && !connected && !busy && !userStopped && !bmwRunning && hasBtPermission() &&
+                    adapter?.isEnabled == true
+                ) {
+                    status = "يتصل تلقائياً بـ ${savedName ?: "الأداپتر"}…"
+                    connect(addr)
+                }
+                delay(15_000)
+            }
+        }
+    }
+
+    /** Picking a device by hand re-enables auto-connect. */
+    fun connectManually(address: String, name: String) {
+        userStopped = false
+        prefs.edit().putString("name", name).apply()
+        connect(address)
     }
 }
 
