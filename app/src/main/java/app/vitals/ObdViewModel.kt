@@ -98,7 +98,10 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
 
     fun visibleKeys(): List<Int> = Pids.displayOrder.filter {
         if (it == Pids.BOOST) 0x0B in supported else it in supported
-    } + Pids.bmw.map { it.def.pid }.filter { it in values }
+    } + (1..4).map { Pids.MISFIRE + it }.filter { it in values } +
+        Pids.bmw.map { it.def.pid }.filter { it in values }
+
+    private var lastMisfire = 0L
 
     private var lastDme = 0L
     private var lastEgs = 0L
@@ -177,6 +180,10 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
                 try {
                     if (now - lastDme > 1500) { lastDme = now; pollBmw(c, 0x12) }
                     if (now - lastEgs > 4000) { lastEgs = now; pollBmw(c, 0x18) }
+                    if (now - lastMisfire > 10_000) {
+                        lastMisfire = now
+                        for (n in 1..4) c.mode06(0xA1 + n)?.get(0x0C)?.let { put(Pids.MISFIRE + n, it.toDouble()) }
+                    }
                 } catch (e: IOException) {
                     lost(e)
                     return@launch

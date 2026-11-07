@@ -82,6 +82,12 @@ object Pids {
         BmwPid(0x18, 0x4431, d(0x2024, "الگير 4431 (اختبار)", "", 0, true), test = true) { it },
     )
 
-    fun def(key: Int): PidDef = if (key == BOOST) boost else
+    /** Misfire count this driving cycle, cylinder n at key MISFIRE + n (Mode 06 MID A1+n). */
+    const val MISFIRE = 0x2030
+    private val misfire = (1..4).associate { n ->
+        (MISFIRE + n) to PidDef(MISFIRE + n, "Misfire سلندر $n", "هالمشوار", 0, 0, false) { 0.0 }
+    }
+
+    fun def(key: Int): PidDef = misfire[key] ?: if (key == BOOST) boost else
         bmw.firstOrNull { it.def.pid == key }?.def ?: all.first { it.pid == key }
 }

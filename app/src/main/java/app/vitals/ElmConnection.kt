@@ -169,6 +169,29 @@ class ElmConnection private constructor(private val t: BleTransport) : Closeable
         return parse01(resp, pid)
     }
 
+    /**
+     * Mode 06 on-board monitor results for one MID, as tid -> value.
+     * MIDs A2..A5 are misfire per cylinder: TID 0B = average of last 10 driving cycles,
+     * TID 0C = count in the current driving cycle.
+     */
+    suspend fun mode06(mid: Int): Map<Int, Int>? {
+        val resp = try { send(String.format(Locale.US, "06%02X", mid), 2000) } catch (e: ElmTimeout) { return null }
+        val lines = resp.uppercase(Locale.US).lines().map { it.replace(" ", "").trim() }.filter { it.isNotEmpty() }
+        val hex = if (lines.size > 1 && lines[0].length == 3 && lines[1].contains(':')) {
+            val len = lines[0].toIntOrNull(16) ?: return null
+            lines.drop(1).filter { it.contains(':') }.joinToString("") { it.substringAfter(':') }.take(len * 2)
+        } else lines.firstOrNull { it.startsWith("46") } ?: return null
+        if (!hex.startsWith("46") || hex.length % 2 != 0) return null
+        val b = try { IntArray(hex.length / 2) { hex.substring(it * 2, it * 2 + 2).toInt(16) } } catch (e: NumberFormatException) { return null }
+        val out = HashMap<Int, Int>()
+        var i = 1
+        while (i + 8 < b.size) { // MID TID UAS value(2) min(2) max(2)
+            if (b[i] == mid) out[b[i + 1]] = (b[i + 3] shl 8) or b[i + 4]
+            i += 9
+        }
+        return out
+    }
+
     /** Walks PID 00, 20, 40… bitmasks and returns every supported mode-01 PID. */
     suspend fun scanSupported(): Set<Int> {
         val set = mutableSetOf<Int>()
