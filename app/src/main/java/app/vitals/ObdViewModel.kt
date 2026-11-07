@@ -352,6 +352,56 @@ class ObdViewModel private constructor(private val app: Application) {
         "4A94 4AAA 4AAB 4AB6 4AB7 4AB8 4ABC 4B24 4B25 4B50 4B51 4B52 4B53 4B58 4B59 4B5A 4B5B 4BCB")
         .split(" ").map { it.toInt(16) }
 
+    // --- Drive mode finder: static flags that may flip with ECO PRO / COMFORT / SPORT ---
+    private val modeDme: List<Int> = "4002 4044 4047 409A 40A4 40DA 40E5 40EF 4105 4117 4118 4121 4123 4125 4128 412B 412C 412D 415F 4181 4186 4187 4310 440A 440B 440C 4424 4426 4427 4428 442A 442B 442C 442E 4430 4433 4434 4500 4502 4503 4508 4509 450C 450D 450E 4510 4511 4512 4513 4514 4515 4516 4517 4518 4519 451A 451B 451C 451D 451E 4526 4527 4530 4531 4532 4533 4534 4535 4538 4539 4540 4605 4608 4618 461B 4620 4621 4622 4662 4663 4680 4681 4683 4700 4704 4705 4711 4712 4713 4714 4716 4730 4731 4732 4733 4734 4735 4736 4800 4801 4802 4803 4804 4805 4808 4809 480A 480E 480F 4811 4813 4880 4881 4882 4883 4895 4896 48A0 48A1 48A2 48A3 48A5 48A6 48A7 48A8 48A9 48AA 48AB 48AC 48AD 48AE 48AF 48B0 48B1 48B2 48B3 48B4 48B5 48B6 48B7 48B8 48B9 48BA 48BB 48BC 48BD 48BE 48BF 48C0 48C1 48C2 48C3 48C4 48C5 48C6 48C7 48D0 48D1 4A02 4A03 4A04 4A11 4A1B 4A1D 4A1E 4A23 4A2E 4A34 4A35 4A36 4A3B 4A3C 4A4E 4A4F 4A52 4A54 4A56 4A60 4A61 4A65 4A69 4A6A 4A6B 4A6C 4A74 4A78 4A95 4A96 4A97 4A99 4AA1 4AA4 4AB1 4AB3 4AB4 4ABD 4AC2 4ACC 4ACD 4ACE 4ACF 4AD0 4AD2 4AD4 4AD5 4AD6 4ADF 4AE0 4AE2 4AE3 4AE4 4AE5 4AE6 4AE7 4AE8 4AE9 4AEA 4AED 4AEE 4AEF 4AF2 4AF3 4AF4 4AF5 4AF6 4AF7 4AF8 4AF9 4AFA 4AFB 4AFE 4B10 4B11 4B12 4B13 4B14 4B15 4B20 4B21 4B22 4B23 4B30 4B31 4B32 4B54 4B55 4B5C 4B5D".split(" ").map { it.toInt(16) }
+    private val modeEgs: List<Int> = "412F 415F 41A0 41A1 41B0 41B1 41B3 41B4 4200 4201 4300 4301 4302 431B 431C 431D 4327 4329 432A 432B 432C 432D 432E 4335 4336 4338 4342 442F 4430 4431 4432 4445 4500 4502 4605 4608 4620 4621 4622 4646 4647".split(" ").map { it.toInt(16) }
+
+    /**
+     * Reads DME + EGS candidates for [seconds] while the driver changes drive mode with the
+     * engine idling, and lists every value that changed with its sequence of values.
+     */
+    fun findDriveMode(seconds: Int = 150) {
+        val c = conn ?: return
+        if (bmwRunning) return
+        bmwRunning = true
+        watchReport = ""
+        bmwJob = scope.launch {
+            val seen = LinkedHashMap<String, MutableList<String>>()
+            val end = System.currentTimeMillis() + seconds * 1000L
+            try {
+                while (isActive && System.currentTimeMillis() < end) {
+                    for ((ecu, list) in listOf(0x18 to modeEgs, 0x12 to modeDme)) {
+                        c.bmw(ecu) { read, _ ->
+                            for (did in list) {
+                                if (!currentCoroutineContext().isActive) break
+                                val d = (read(did) as? Uds.Positive)?.data ?: continue
+                                val hex = d.joinToString(" ") { String.format(Locale.US, "%02X", it) }
+                                val l = seen.getOrPut(ecuName(ecu) + " " + hex4(did)) { mutableListOf() }
+                                if (l.isEmpty() || l.last() != hex) l.add(hex)
+                            }
+                        }
+                        val left = ((end - System.currentTimeMillis()) / 1000).coerceAtLeast(0)
+                        bmwProgress = "وضع القيادة: باقي ${left} ثانية · تغيّر ${seen.count { it.value.size > 1 }}"
+                    }
+                }
+                val changed = seen.filter { it.value.size > 1 }.entries.sortedBy { it.value.size }
+                watchReport = buildString {
+                    append("Vitals drive mode\n")
+                    if (changed.isEmpty()) append("ماكو قيمة تغيّرت\n")
+                    for ((k, v) in changed) append(k).append(": ").append(v.joinToString(" → ")).append('\n')
+                }
+                addLog(watchReport)
+                bmwProgress = "خلص · ${changed.size} قيمة تغيّرت"
+            } catch (e: IOException) {
+                lost(e)
+            } catch (e: Exception) {
+                bmwProgress = "توقف: ${e.message}"
+            } finally {
+                bmwRunning = false
+            }
+        }
+    }
+
     fun canWatch(ecu: Int) = ecu == 0x12 || bmwHits.any { it.ecu == ecu }
 
     var watchReport by mutableStateOf(""); private set

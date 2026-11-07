@@ -500,7 +500,8 @@ private fun BmwScanner(vm: ObdViewModel) {
     Column(Modifier.fillMaxSize().padding(12.dp)) {
         Text(
             "يقرا قيم BMW الخاصة من الكمبيوتر مباشرة (قراءة بس، ما يغيّر شي). خلي المحرك شغّال، " +
-                "والبيانات الحية تتوقف وقت الفحص. بعد الفحص اضغط مراقبة، وخلي السيارة P ودوس بنزين وعوف لحد ما تخلص.",
+                "والبيانات الحية تتوقف وقت الفحص. بعد الفحص اضغط مراقبة، وخلي السيارة P ودوس بنزين وعوف لحد ما تخلص. " +
+                "زر وضع القيادة: لا تدوس، وبدّل ECO PRO ← COMFORT ← SPORT وخلي كل وضع 15 ثانية لحد ما يخلص.",
             color = Muted, fontSize = 12.sp,
         )
         Spacer(Modifier.height(8.dp))
@@ -541,6 +542,10 @@ private fun BmwScanner(vm: ObdViewModel) {
                 }) { Text("ابدأ الفحص") }
                 Spacer(Modifier.width(6.dp))
                 Button(onClick = { vm.bmwWatch(ecu) }, enabled = vm.canWatch(ecu)) { Text("مراقبة") }
+            }
+            Spacer(Modifier.width(6.dp))
+            if (!vm.bmwRunning) {
+                Button(onClick = { vm.findDriveMode() }) { Text("وضع القيادة") }
             }
             Spacer(Modifier.width(8.dp))
             TextButton(onClick = { clipboard.setText(AnnotatedString(vm.bmwReport())) }, enabled = vm.bmwHits.isNotEmpty() || vm.watchReport.isNotEmpty()) {
