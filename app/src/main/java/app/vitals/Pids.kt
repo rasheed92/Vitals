@@ -7,9 +7,9 @@ data class PidDef(
     val bytes: Int,
     val decimals: Int,
     val fast: Boolean,
-    val decode: (IntArray) -> Double,
     /** Shown instead of the number when set (e.g. P/R/N/D). */
     val text: ((Double) -> String)? = null,
+    val decode: (IntArray) -> Double,
 )
 
 data class Reading(val value: Double, val min: Double, val max: Double, val history: List<Float>)
@@ -75,7 +75,7 @@ object Pids {
         BmwPid(0x12, 0x4A4A, d(0x2012, "توقيت سلندر 2 (اختبار)", "°", 1, true), signed = true, test = true) { it * 0.075 },
         BmwPid(0x12, 0x4A4C, d(0x2013, "توقيت سلندر 3 (اختبار)", "°", 1, true), signed = true, test = true) { it * 0.075 },
         BmwPid(0x12, 0x4A4D, d(0x2014, "توقيت سلندر 4 (اختبار)", "°", 1, true), signed = true, test = true) { it * 0.075 },
-        BmwPid(0x18, 0x4605, PidDef(0x2020, "وضع الگير", "", 0, 0, true, { 0.0 }) { selector(it) }) { it },
+        BmwPid(0x18, 0x4605, PidDef(0x2020, "وضع الگير", "", 0, 0, true, text = { selector(it) }) { 0.0 }) { it },
         BmwPid(0x18, 0x4301, d(0x2021, "زيت الگير؟ 4301 (اختبار)", "", 0, false), test = true) { it },
         BmwPid(0x18, 0x41B4, d(0x2022, "زيت الگير؟ 41B4 (اختبار)", "", 0, false), firstByteOnly = true, test = true) { it },
         BmwPid(0x18, 0x41A1, d(0x2023, "زيت الگير؟ 41A1 (اختبار)", "", 0, false), firstByteOnly = true, test = true) { it },
