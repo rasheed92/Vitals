@@ -98,6 +98,26 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
 
     fun visibleKeys(): List<Int> = Pids.displayOrder.filter {
         if (it == Pids.BOOST) 0x0B in supported else it in supported
+    } + Pids.bmw.map { it.def.pid }.filter { it in values }
+
+    private var lastDme = 0L
+    private var lastEgs = 0L
+
+    /** One BMW session per ECU: read its live DIDs and store them as cards. */
+    private suspend fun pollBmw(c: ElmConnection, ecu: Int) {
+        val list = Pids.bmw.filter { it.ecu == ecu }
+        val got = c.bmw(ecu) { read, _ -> list.map { it to (read(it.did) as? Uds.Positive)?.data } }
+        for ((p, d) in got) {
+            if (d == null || d.isEmpty()) continue
+            val bytes = if (p.firstByteOnly) d.copyOfRange(0, 1) else d
+            var u = 0L
+            for (b in bytes) u = (u shl 8) or b.toLong()
+            val bits = bytes.size * 8
+            val raw = if (p.signed && u >= (1L shl (bits - 1))) u - (1L shl bits) else u
+            var v = p.calc(raw.toDouble())
+            if (p.def.pid == Pids.BMW_BOOST) v = (v - (values[0x33]?.value ?: 101.3)) / 100.0
+            put(p.def.pid, v)
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -152,6 +172,14 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
                 values[0x0B]?.let { map ->
                     val baro = values[0x33]?.value ?: 101.3
                     put(Pids.BOOST, (map.value - baro) / 100.0)
+                }
+                val now = System.currentTimeMillis()
+                try {
+                    if (now - lastDme > 1500) { lastDme = now; pollBmw(c, 0x12) }
+                    if (now - lastEgs > 4000) { lastEgs = now; pollBmw(c, 0x18) }
+                } catch (e: IOException) {
+                    lost(e)
+                    return@launch
                 }
                 tick++
                 delay(20)

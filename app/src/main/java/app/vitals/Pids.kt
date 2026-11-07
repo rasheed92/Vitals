@@ -42,5 +42,38 @@ object Pids {
         0x04, 0x11, 0x10, 0x62, 0x42, 0x46, 0x2F, 0x0B, 0x33,
     )
 
-    fun def(key: Int): PidDef = if (key == BOOST) boost else all.first { it.pid == key }
+    // --- BMW UDS values found by the watch on this car (DME 0x12, EGS 0x18) ---
+    const val BMW_BOOST = 0x2001
+
+    /** [calc] gets the raw value (big-endian, signed if [signed]); [test] = not confirmed yet. */
+    class BmwPid(
+        val ecu: Int, val did: Int, val def: PidDef,
+        val signed: Boolean = false, val firstByteOnly: Boolean = false, val test: Boolean = false,
+        val calc: (Double) -> Double,
+    )
+
+    private fun d(key: Int, label: String, unit: String, dec: Int, fast: Boolean) =
+        PidDef(key, label, unit, 0, dec, fast) { 0.0 }
+
+    private fun kelvin(raw: Double) = raw / 10.0 - 273.15
+
+    val bmw: List<BmwPid> = listOf(
+        BmwPid(0x12, 0x4202, d(BMW_BOOST, "البوست · BMW", "bar", 2, true)) { it * 0.004249 - 8.276 }, // kPa, boost computed later
+        BmwPid(0x12, 0x4300, d(0x2002, "حرارة الماي · BMW", "°C", 1, false)) { kelvin(it) },
+        BmwPid(0x12, 0x4408, d(0x2003, "حرارة الزيت · BMW", "°C", 1, false)) { kelvin(it) },
+        BmwPid(0x12, 0x4A2B, d(0x2004, "هواء السحب · BMW", "°C", 1, false)) { kelvin(it) },
+        BmwPid(0x12, 0x4206, d(0x2005, "الهواء MAF · BMW", "g/s", 1, true)) { it / 32.0 / 3.6 },
+        BmwPid(0x12, 0x4A49, d(0x2011, "توقيت سلندر 1 (اختبار)", "°", 1, true), signed = true, test = true) { it * 0.075 },
+        BmwPid(0x12, 0x4A4A, d(0x2012, "توقيت سلندر 2 (اختبار)", "°", 1, true), signed = true, test = true) { it * 0.075 },
+        BmwPid(0x12, 0x4A4C, d(0x2013, "توقيت سلندر 3 (اختبار)", "°", 1, true), signed = true, test = true) { it * 0.075 },
+        BmwPid(0x12, 0x4A4D, d(0x2014, "توقيت سلندر 4 (اختبار)", "°", 1, true), signed = true, test = true) { it * 0.075 },
+        BmwPid(0x18, 0x4605, d(0x2020, "وضع الگير · خام (اختبار)", "", 0, true), test = true) { it },
+        BmwPid(0x18, 0x4301, d(0x2021, "زيت الگير؟ 4301 (اختبار)", "", 0, false), test = true) { it },
+        BmwPid(0x18, 0x41B4, d(0x2022, "زيت الگير؟ 41B4 (اختبار)", "", 0, false), firstByteOnly = true, test = true) { it },
+        BmwPid(0x18, 0x41A1, d(0x2023, "زيت الگير؟ 41A1 (اختبار)", "", 0, false), firstByteOnly = true, test = true) { it },
+        BmwPid(0x18, 0x4431, d(0x2024, "الگير 4431 (اختبار)", "", 0, true), test = true) { it },
+    )
+
+    fun def(key: Int): PidDef = if (key == BOOST) boost else
+        bmw.firstOrNull { it.def.pid == key }?.def ?: all.first { it.pid == key }
 }
